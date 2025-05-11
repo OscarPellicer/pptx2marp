@@ -9,7 +9,7 @@ A tool to convert Powerpoint pptx file into markdown.
 * Titles. Custom table of contents with fuzzy matching is supported.
 * Lists with arbitrary depth.
 * Text with **bold**, _italic_, color and [hyperlink](https://github.com/ssine/pptx2md/blob/master/README.md)
-* Pictures. They are extracted into image file and relative path is inserted.
+* Pictures. They are extracted into image file, with crop settings from PowerPoint applied, and a relative path is inserted.
 * Tables with merged cells.
 * `Inline code` using monospaced fonts.
 * Code blocks, where text boxes primarily styled with monospaced fonts are converted.
@@ -218,10 +218,11 @@ code
 
 ### Special Elements
 * Images:
-  * Extracted to specified image directory
-  * WMF images are converted to PNG when possible
-  * Image width can be constrained with `--image-width`
-  * HTML img tags are used when width is specified
+  * Extracted to specified image directory.
+  * Crop settings (e.g., crop left, right, top, bottom) defined within PowerPoint for a picture are automatically applied to the extracted image file.
+  * WMF images are converted to PNG when possible (this conversion happens before potential cropping).
+  * Image width can be constrained with `--image-width`.
+  * HTML img tags are used when width is specified.
 * Tables:
   * Merged cells are supported
   * Complex formatting within cells is preserved

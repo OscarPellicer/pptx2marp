@@ -323,15 +323,14 @@ def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageEl
 
         crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct = 0.0, 0.0, 0.0, 0.0
         has_crop_info = False
-        if hasattr(shape, 'pic') and shape.pic is not None:
-            if hasattr(shape.pic, 'crop_left') and shape.pic.crop_left > 0.00001: # Use small epsilon
-                 crop_l_pct = shape.pic.crop_left; has_crop_info = True
-            if hasattr(shape.pic, 'crop_right') and shape.pic.crop_right > 0.00001:
-                 crop_r_pct = shape.pic.crop_right; has_crop_info = True
-            if hasattr(shape.pic, 'crop_top') and shape.pic.crop_top > 0.00001:
-                 crop_t_pct = shape.pic.crop_top; has_crop_info = True
-            if hasattr(shape.pic, 'crop_bottom') and shape.pic.crop_bottom > 0.00001:
-                 crop_b_pct = shape.pic.crop_bottom; has_crop_info = True
+        if hasattr(shape, 'crop_left') and shape.crop_left > 0.00001: # Use small epsilon
+                crop_l_pct = shape.crop_left; has_crop_info = True
+        if hasattr(shape, 'crop_right') and shape.crop_right > 0.00001:
+                crop_r_pct = shape.crop_right; has_crop_info = True
+        if hasattr(shape, 'crop_top') and shape.crop_top > 0.00001:
+                crop_t_pct = shape.crop_top; has_crop_info = True
+        if hasattr(shape, 'crop_bottom') and shape.crop_bottom > 0.00001:
+                crop_b_pct = shape.crop_bottom; has_crop_info = True
 
         if has_crop_info and config.apply_cropping_in_parser:
             left = int(round(pil_original_w * crop_l_pct))
