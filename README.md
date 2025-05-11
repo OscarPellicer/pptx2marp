@@ -19,6 +19,7 @@ A tool to convert Powerpoint pptx file into markdown.
 * [Tiddlywiki](https://tiddlywiki.com/)'s wikitext
 * [Madoko](https://www.madoko.net/)
 * [Quarto](https://quarto.org/)
+* [Marp](https://marp.app/)
 
 _Please star this repo if you like it!_
 
@@ -89,6 +90,7 @@ Use it with `pptx2md [filename] -t titles.txt`.
 * `--min-block-size [size]` the minimum number of characters for a text block to be outputted
 * `--wiki` / `--mdk` if you happen to be using tiddlywiki or madoko, this argument outputs the corresponding markup language
 * `--qmd` outputs to the qmd markup language used for [quarto](https://quarto.org/docs/presentations/revealjs/) powered presentations
+* `--marp` outputs to the Marp markdown language for slide presentations
 * `--page [number]` only convert the specified page
 * `--keep-similar-titles` keep similar titles and add "(cont.)" to repeated slide titles
 
@@ -162,6 +164,7 @@ The `ConversionConfig` class accepts the same parameters as the command line arg
 - `wiki`: Output in TiddlyWiki format
 - `mdk`: Output in Madoko format
 - `qmd`: Output in Quarto format
+- `marp`: Output in Marp format
 - `page`: Convert only specified page number
 - `keep_similar_titles`: Keep similar titles with "(cont.)" suffix
 
