@@ -11,6 +11,8 @@ A tool to convert Powerpoint pptx file into markdown.
 * Text with **bold**, _italic_, color and [hyperlink](https://github.com/ssine/pptx2md/blob/master/README.md)
 * Pictures. They are extracted into image file and relative path is inserted.
 * Tables with merged cells.
+* `Inline code` using monospaced fonts.
+* Code blocks, where text boxes primarily styled with monospaced fonts are converted.
 * Top-to-bottom then left-to-right block order.
 
 **Supported output:**
@@ -182,6 +184,19 @@ The `ConversionConfig` class accepts the same parameters as the command line arg
 * Grouped shapes are recursively flattened to process their contents
 * Shapes are processed in top-to-bottom, left-to-right order
 
+### Code Handling
+* **Inline Code**: Text runs formatted with common monospaced fonts (e.g., Consolas, Courier New, Menlo) are converted to inline code using backticks (e.g., `` `code` ``).
+* **Code Blocks**:
+    * Text boxes where the majority of the text is styled with monospaced fonts are automatically detected and converted into fenced code blocks.
+
+`````
+```language
+code
+```
+`````
+
+**Note:** Language detection for syntax highlighting is not currently implemented; blocks are output with an empty language tag or no tag.
+
 ### Title Handling
 * When using custom titles:
   * Fuzzy matching is used to match slide titles with the provided title list
@@ -194,6 +209,7 @@ The `ConversionConfig` class accepts the same parameters as the command line arg
   * Bold text from PPT is converted to `**bold**`
   * Italic text is converted to `_italic_`
   * Hyperlinks are preserved as `[text](url)`
+  * Inline code is converted to `` `code` `` (see Code Handling section)
 * Color handling:
   * Theme colors marked as "Accent 1-6" are preserved
   * RGB colors are converted to HTML color codes
