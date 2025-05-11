@@ -129,7 +129,10 @@ class Formatter:
         # Strip only at the very end of processing all runs for an element.
         all_text = "".join(res_parts).strip()
         
-        # TODO: Do this better.If text contains `` remove it
+        # TODO: Do this better. Delete quadruple asterisks "****"
+        all_text = all_text.replace('****', '')
+
+        # TODO: Do this better. Delete repeated backticks "``"
         all_text = all_text.replace('``', '')
 
         return all_text
@@ -863,7 +866,17 @@ img[alt~="right"] {
                 content_for_columns = all_elements[1:] # Elements after the title
 
             # Final decision: must qualify AND have enough elements left for columns
-            actually_split_columns = initial_split_qualification and len(content_for_columns) >= 2
+            # AND not contain a table in the content intended for columns.
+            contains_table_in_content_for_columns = False
+            if initial_split_qualification: # Only check for tables if it might split
+                for element in content_for_columns:
+                    if element.type == ElementType.Table:
+                        contains_table_in_content_for_columns = True
+                        break
+            
+            actually_split_columns = initial_split_qualification and \
+                                     len(content_for_columns) >= 2 and \
+                                     not contains_table_in_content_for_columns
 
             # Determine effective slide class
             effective_slide_class = current_slide_class
@@ -1002,20 +1015,6 @@ img[alt~="right"] {
             elif image_center_x > right_third_boundary: 
                 position_hint = "right"
 
-        # Check if the image is large enough to be a candidate for a background image.
-        # is_background_candidate = False
-        # if current_display_width is not None and current_display_height is not None:
-        #     if current_display_width >= slide_width_for_hinting * 0.65 and \
-        #        current_display_height >= MARP_TARGET_HEIGHT_PX * 0.65:
-        #         is_background_candidate = True
-        #         # If it's a background candidate, prepend "bg" to its position hint.
-        #         if position_hint == "left":
-        #             position_hint = "bg left"
-        #         elif position_hint == "right":
-        #             position_hint = "bg right"
-        #         else: # Default to "bg" if centered or no specific L/R hint.
-        #             position_hint = "bg" 
-
         # Use the calculated position_hint, or fallback to a hint provided on the element itself.
         effective_position_hint = position_hint or getattr(element, 'position_hint', None)
         
@@ -1027,14 +1026,7 @@ img[alt~="right"] {
                  marp_alt_text_keywords.append("left")
             elif effective_position_hint == "right":
                  marp_alt_text_keywords.append("right")
-            # elif effective_position_hint.startswith("bg"):
-            #     # For background images, add "bg" and any directional keywords (e.g., "left", "right").
-            #     bg_directive_parts = effective_position_hint.split(" ") 
-            #     marp_alt_text_keywords.extend(bg_directive_parts)
-            #     has_bg_keyword = True
-            #     # Marp handles sizing for background images; remove w: and h: keywords.
-            #     marp_alt_text_keywords = [kw for kw in marp_alt_text_keywords if not (kw.startswith("w:") or kw.startswith("h:"))]
-        
+
         # Construct the final alt text string for Marp.
         # Order is important: [bg/positioning] [original alt text] [w:/h: sizing keywords (if not bg)].
         ordered_alt_keywords = []
@@ -1076,10 +1068,14 @@ img[alt~="right"] {
         self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
     def get_accent(self, text): # Italics
+        if not text.strip(): # If text is empty or all whitespace
+            return text      # Return original text (empty or whitespace)
         return '*' + text.strip() + '*' 
 
     def get_strong(self, text): # Bold
-        return '**' + text.strip() + '**' 
+        if not text.strip(): # If text is empty or all whitespace
+            return text      # Return original text (empty or whitespace)
+        return '**' + text.strip() + '**'
 
     def get_colored(self, text, rgb):
         # Standard HTML for color, Marp should support it

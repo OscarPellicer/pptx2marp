@@ -1,3 +1,11 @@
+# PPT2MARP
+
+This is a fork of the `pptx2md` project, with the ability to convert Powerpoint pptx files into Marp markdown. Right now the main functionality is working, but there are some smaller problems left to be fixed:
+
+- There are too many images not being extracted: `Shape in slide 33 seems to be a picture but has no image data, skipped.`
+- The PowerPoint graphs are not being converted to images.
+- Forumlas are not being converted to LaTeX.
+
 # PPTX2MD
 
 [![Downloads](https://pepy.tech/badge/pptx2md)](https://pepy.tech/project/pptx2md)

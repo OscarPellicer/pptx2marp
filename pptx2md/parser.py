@@ -57,7 +57,7 @@ def is_code_font(font) -> bool:
     if font and font.name:
         # Common monospaced fonts; .lower() for case-insensitivity.
         # Add more as needed.
-        monospaced_fonts = ["consolas", "courier new", "menlo", "monaco", "lucida console", "dejavu sans mono"]
+        monospaced_fonts = ["consolas", "courier new", "menlo", "menlo regular", "monaco", "lucida console", "dejavu sans mono"]
         if font.name.lower() in monospaced_fonts:
             return True
     return False
@@ -147,6 +147,8 @@ def process_title(config: ConversionConfig, shape, slide_idx) -> TitleElement:
 def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Union[ListItemElement, ParagraphElement]]:
     results = []
     
+    # if slide_idx == 52: breakpoint()
+
     if not shape.has_text_frame or not shape.text_frame.paragraphs:
         return results
 
