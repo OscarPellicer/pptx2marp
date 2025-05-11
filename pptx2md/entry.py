@@ -17,7 +17,7 @@ import logging
 import pptx2md.outputter as outputter
 from pptx2md.parser import parse
 from pptx2md.types import ConversionConfig
-from pptx2md.utils import load_pptx, prepare_titles
+from pptx2md.utils import load_pptx, prepare_titles, emu_to_px
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,14 @@ def convert(config: ConversionConfig):
 
     prs = load_pptx(config.pptx_path)
 
+    # Extract and store actual slide dimensions in config
+    if hasattr(prs, 'slide_width') and prs.slide_width is not None:
+        config.slide_width_px = emu_to_px(prs.slide_width)
+    if hasattr(prs, 'slide_height') and prs.slide_height is not None:
+        config.slide_height_px = emu_to_px(prs.slide_height)
+
     logger.info("conversion started")
+    logger.info(f"Detected slide dimensions: {config.slide_width_px}px width, {config.slide_height_px}px height.")
 
     ast = parse(config, prs)
 
@@ -44,6 +51,8 @@ def convert(config: ConversionConfig):
         out = outputter.MadokoFormatter(config)
     elif config.is_qmd:
         out = outputter.QuartoFormatter(config)
+    elif config.is_marp:
+        out = outputter.MarpFormatter(config)
     else:
         out = outputter.MarkdownFormatter(config)
 

@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
 
-class ConversionConfig(BaseModel):
+@dataclass
+class ConversionConfig:
     """Configuration for PowerPoint to Markdown conversion."""
 
     pptx_path: Path
@@ -38,6 +40,9 @@ class ConversionConfig(BaseModel):
 
     image_width: Optional[int] = None
     """Maximum image width in px"""
+
+    image_height: Optional[int] = None
+    """Maximum image height in px"""
 
     disable_image: bool = False
     """Disable image extraction"""
@@ -66,13 +71,16 @@ class ConversionConfig(BaseModel):
     is_qmd: bool = False
     """Generate output as quarto markdown presentation"""
 
+    is_marp: bool = False
+    """Generate output as marp markdown"""
+
     min_block_size: int = 15
     """The minimum character number of a text block to be converted"""
 
     page: Optional[int] = None
     """Only convert the specified page"""
 
-    custom_titles: dict[str, int] = {}
+    custom_titles: List[Any] = field(default_factory=list)
     """Mapping of custom titles to their heading levels"""
 
     try_multi_column: bool = False
@@ -81,6 +89,15 @@ class ConversionConfig(BaseModel):
     keep_similar_titles: bool = False
     """Keep similar titles (allow for repeated slide titles - One or more - Add (cont.) to the title)"""
 
+    slide_width_px: Optional[int] = None
+    """Actual slide width in pixels"""
+
+    slide_height_px: Optional[int] = None
+    """Actual slide height in pixels"""
+
+    apply_cropping_in_parser: bool = True
+    """Apply cropping directly in the parser, modifying the saved image."""
+
 
 class ElementType(str, Enum):
     Title = "Title"
@@ -88,7 +105,7 @@ class ElementType(str, Enum):
     Paragraph = "Paragraph"
     Image = "Image"
     Table = "Table"
-
+    CodeBlock = "CodeBlock"
 
 class TextStyle(BaseModel):
     is_accent: bool = False
@@ -138,6 +155,18 @@ class ImageElement(BaseElement):
     width: Optional[int] = None
     original_ext: str = ""  # For tracking original file extension (e.g. wmf)
     alt_text: str = ""  # For accessibility
+    display_width_px: Optional[int] = None
+    display_height_px: Optional[int] = None
+    original_width_px: Optional[int] = None
+    original_height_px: Optional[int] = None
+    original_filename: Optional[str] = None
+    left_px: Optional[int] = None
+    top_px: Optional[int] = None
+    rotation: Optional[float] = None
+    crop_left_pct: Optional[float] = None
+    crop_right_pct: Optional[float] = None
+    crop_top_pct: Optional[float] = None
+    crop_bottom_pct: Optional[float] = None
 
 
 class TableElement(BaseElement):

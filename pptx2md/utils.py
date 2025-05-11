@@ -19,11 +19,19 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Union
 
 from pptx import Presentation
 
 logger = logging.getLogger(__name__)
 
+EMU_PER_PX = 9525  # Based on 96 DPI: 1 inch = 914400 EMU, 1 inch = 96px => 1px = 9525 EMU
+
+def emu_to_px(emu_value: Union[int, float, None]) -> int:
+    """Converts EMU to pixels, rounding to the nearest pixel."""
+    if emu_value is None:
+        return 0
+    return round(emu_value / EMU_PER_PX)
 
 def fix_null_rels(file_path):
     temp_dir_name = tempfile.mkdtemp()

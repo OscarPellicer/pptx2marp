@@ -45,6 +45,7 @@ def parse_args() -> ConversionConfig:
     arg_parser.add_argument('--wiki', action="store_true", help='generate output as wikitext(TiddlyWiki)')
     arg_parser.add_argument('--mdk', action="store_true", help='generate output as madoko markdown')
     arg_parser.add_argument('--qmd', action="store_true", help='generate output as quarto markdown presentation')
+    arg_parser.add_argument('--marp', action="store_true", help='generate output as marp markdown presentation')
     arg_parser.add_argument('--min-block-size',
                             type=int,
                             default=15,
@@ -54,12 +55,21 @@ def parse_args() -> ConversionConfig:
         "--keep-similar-titles",
         action="store_true",
         help="keep similar titles (allow for repeated slide titles - One or more - Add (cont.) to the title)")
+    arg_parser.add_argument(
+        '--disable-parser-cropping',
+        action="store_false", 
+        dest='apply_cropping_in_parser',
+        help='Disable pre-cropping of images in the parser. Crop information (if available) will be passed to the formatter.'
+    )
+    arg_parser.set_defaults(apply_cropping_in_parser=True)
 
     args = arg_parser.parse_args()
 
     # Determine output path if not specified
     if args.output is None:
         extension = '.tid' if args.wiki else '.qmd' if args.qmd else '.md'
+        if args.marp:
+            extension = '.md'
         args.output = Path(f'out{extension}')
 
     return ConversionConfig(
@@ -78,9 +88,11 @@ def parse_args() -> ConversionConfig:
         is_wiki=args.wiki,
         is_mdk=args.mdk,
         is_qmd=args.qmd,
+        is_marp=args.marp,
         min_block_size=args.min_block_size,
         page=args.page,
         keep_similar_titles=args.keep_similar_titles,
+        apply_cropping_in_parser=args.apply_cropping_in_parser,
     )
 
 
