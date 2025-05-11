@@ -638,22 +638,45 @@ img[alt~="right"] {
 
 </style>
 
-<!-- Usage examples for images with captions:
-                         
-<div class="figure-container align-right" style="width: 252px;">
-    <img src="img/Tema%201_0.png" alt="Descriptive alt text" width="252">
-    <p class="figcaption">This is the caption for the image.</p>
-</div>
+<!-- 
+  MANUAL LAYOUT USAGE EXAMPLES:
 
-<div class="figure-container align-center">
-    <img src="img/some-image.jpg" alt="Descriptive alt text">
-    <p class="figcaption">Caption for centered image.</p>
-</div>         
+  Multi-column Layout:
+  (Automatic for 'smaller'/'smallest' slides with short lines, title excluded)
+  To manually create a two-column layout:
 
-<div class="figure-container align-left" style="width: 30%;"> 
-    <img src="img/another-image.png" alt="Descriptive alt text">
-    <em>A short italic caption.</em>
-</div>
+  <div class="columns">
+  <div>
+
+    * First column content
+    * Can contain lists, paragraphs, etc.
+
+  </div>
+  <div>
+
+    * Second column content
+    * Each column is equally sized by default.
+
+  </div>
+  </div>
+
+  Figures with Captions:
+  Wrap an image and its caption in a 'figure-container'.
+  Use 'align-left', 'align-right', or 'align-center' for positioning.
+  Set width on the container for floated figures.
+  Caption can be <p class="figcaption">...</p> or <em>...</em>.
+
+  Example (right-floated):
+  <div class="figure-container align-right" style="width: 252px;">
+    <img src="path/to/your/image.png" alt="Alt text" width="252">
+    <p class="figcaption">This is the caption.</p>
+  </div>
+
+  Example (centered):
+  <div class="figure-container align-center" style="max-width: 500px;"> 
+    <img src="path/to/your/image.png" alt="Alt text">
+    <em>A simple italic caption.</em>
+  </div>
 -->
 
 ''')
