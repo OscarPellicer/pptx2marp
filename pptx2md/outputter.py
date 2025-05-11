@@ -566,56 +566,163 @@ img[alt~="right"] {
 }
 /* For Marp background images: ![bg right:30% 200%](image.jpg) */
 /* For Marp image sizing: ![alt text w:300px](image.png) */
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr); /* Creates two equal-width columns */
+  gap: 2em; /* Adjust the gap between columns as needed */
+}
+
+.columns > div {
+  /* Optional: You can add styling for individual columns here if needed */
+  /* For example, to ensure lists render correctly within columns */
+  overflow: hidden; /* Helps with list rendering inside flex/grid items */
+}
+
+/* Styles for images with captions (figure container) */
+.figure-container {
+  margin-bottom: 1em; /* Space below the figure block */
+  /* Consider clear: both; if flow issues arise after floated figures,
+     though Marp sections usually handle this. */
+}
+
+.figure-container img {
+  display: block; /* Image as a block element within its container */
+  max-width: 100%; /* Responsive: won't overflow container */
+  height: auto;
+  /* Center image if container is wider than image (e.g., for align-center) */
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.figure-container.align-left {
+  float: left;
+  margin-right: 1em; /* Spacing from content to its right */
+  margin-left: 0; /* Override auto margins for float */
+}
+.figure-container.align-left img {
+  margin-left: 0; /* Align image to the left of its container */
+  margin-right: auto; /* Allow centering if container is somehow wider */
+}
+
+.figure-container.align-right {
+  float: right;
+  margin-left: 1em; /* Spacing from content to its left */
+  margin-right: 0; /* Override auto margins for float */
+}
+.figure-container.align-right img {
+  margin-right: 0; /* Align image to the right of its container */
+  margin-left: auto; /* Allow centering if container is somehow wider */
+}
+
+.figure-container.align-center {
+  display: block; /* Container is block, centered by its own margins */
+  margin-left: auto;
+  margin-right: auto;
+  /* The img inside will be centered due to its own auto margins */
+}
+
+.figure-container .figcaption,
+.figure-container > em { /* Supports <p class="figcaption"> or direct <em> */
+  display: block; /* Ensures caption is block for consistent styling */
+  font-size: 0.85em;
+  color: #555; /* Muted color for caption text */
+  text-align: center; /* Captions are centered by default */
+  margin-top: 0.4em; /* Space between image and caption */
+  line-height: 1.3;
+  font-style: normal; /* Override em's italic if p.figcaption is used; em will be italic */
+}
+.figure-container > em {
+  font-style: italic; /* Ensure em tag remains italic */
+}
+
 </style>
+
+<!-- Usage examples for images with captions:
+                         
+<div class="figure-container align-right" style="width: 252px;">
+    <img src="img/Tema%201_0.png" alt="Descriptive alt text" width="252">
+    <p class="figcaption">This is the caption for the image.</p>
+</div>
+
+<div class="figure-container align-center">
+    <img src="img/some-image.jpg" alt="Descriptive alt text">
+    <p class="figcaption">Caption for centered image.</p>
+</div>         
+
+<div class="figure-container align-left" style="width: 30%;"> 
+    <img src="img/another-image.png" alt="Descriptive alt text">
+    <em>A short italic caption.</em>
+</div>
+-->
 
 ''')
 
-    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int]]:
-        """Calculates number of semantic lines, total characters, and max image dimensions."""
+    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int], int, int]:
+        """Calculates number of semantic lines, total characters, max image dimensions,
+           and specific text line/char counts for avg line length heuristic."""
         line_count = 0
         char_count = 0
         max_image_width: Optional[int] = 0
         max_image_height: Optional[int] = 0
+        
+        text_lines_for_avg_heuristic = 0
+        text_chars_for_avg_heuristic = 0
 
         for element in elements_list:
+            element_text_content_for_avg = ""
+            is_text_for_avg_heuristic = False
+
             if element.type == ElementType.Title:
                 line_count += 1
                 content = element.content.strip() if isinstance(element.content, str) else ""
                 char_count += len(content)
             elif element.type == ElementType.ListItem:
                 line_count += 1
+                text_lines_for_avg_heuristic += 1
+                is_text_for_avg_heuristic = True
                 if isinstance(element.content, list): # List[TextRun]
-                    for run in element.content:
-                        char_count += len(run.text)
+                    item_text = "".join(run.text for run in element.content)
+                    char_count += len(item_text)
+                    element_text_content_for_avg = item_text
+                elif isinstance(element.content, str): 
+                    char_count += len(element.content)
+                    element_text_content_for_avg = element.content
+
             elif element.type == ElementType.Paragraph:
-                line_count += 1 # Each paragraph is at least one line
+                line_count += 1 
+                text_lines_for_avg_heuristic += 1
+                is_text_for_avg_heuristic = True
                 if isinstance(element.content, list): # List[TextRun]
                     para_text = "".join(run.text for run in element.content)
                     char_count += len(para_text)
-                    # line_count += para_text.count('\n') # More accurate internal line count if needed
+                    element_text_content_for_avg = para_text
                 elif isinstance(element.content, str): 
-                     char_count += len(element.content) # Should be List[TextRun]
-
+                     char_count += len(element.content)
+                     element_text_content_for_avg = element.content
+            
             elif element.type == ElementType.CodeBlock:
                 line_count += (element.content.count('\n') + 1) if element.content else 1
                 char_count += len(element.content)
             
             elif element.type == ElementType.Table:
-                if element.content: # content is List[List[List[TextRun]]]
-                    line_count += len(element.content) # Add number of rows
+                if element.content: 
+                    line_count += len(element.content) 
                     for row in element.content:
                         for cell_runs in row:
                             for run in cell_runs:
                                 char_count += len(run.text)
             
             elif element.type == ElementType.Image:
-                # Consider image presence as contributing to slide density, but not lines/chars
                 if element.display_width_px is not None:
                     max_image_width = max(max_image_width or 0, element.display_width_px)
                 if element.display_height_px is not None:
                     max_image_height = max(max_image_height or 0, element.display_height_px)
 
-        return line_count, char_count, max_image_width if max_image_width > 0 else None, max_image_height if max_image_height > 0 else None
+            if is_text_for_avg_heuristic:
+                text_chars_for_avg_heuristic += len(element_text_content_for_avg.strip())
+
+        return line_count, char_count, max_image_width, max_image_height, text_lines_for_avg_heuristic, text_chars_for_avg_heuristic
 
     def _put_elements_on_slide(self, elements: List[SlideElement], is_continued_slide: bool = False):
         """Helper to output a list of elements. `last_title_info` is now an instance var."""
@@ -695,18 +802,18 @@ img[alt~="right"] {
             marp_slide_counter += 1
 
             all_elements = []
-
             if slide.type == SlideType.General:
                 all_elements = slide.elements
             elif slide.type == SlideType.MultiColumn:
-                all_elements = slide.preface + [el for col in slide.columns for el in col] # Flatten columns for now
+                # For Marp, flatten MultiColumn for now, title separation will handle preface.
+                all_elements = slide.preface + [el for col in slide.columns for el in col] 
 
-            if not all_elements: # Skip empty slides
-                 if marp_slide_counter < num_total_slides : # Check if it's not the last conceptual slide
+            if not all_elements: 
+                 if marp_slide_counter < num_total_slides : 
                     self.ofile.write("\n---\n\n")
                  continue
 
-            line_count, char_count, max_img_w, max_img_h = self._get_slide_content_metrics(all_elements)
+            line_count, char_count, max_img_w, max_img_h, text_lines_for_avg, text_chars_for_avg = self._get_slide_content_metrics(all_elements)
 
             def get_slide_class(lc: int) -> Optional[str]:
                 if lc > LINES_SMALLER_MAX: return "smallest"
@@ -715,10 +822,62 @@ img[alt~="right"] {
                 return None
 
             current_slide_class = get_slide_class(line_count)
-            if current_slide_class:
-                self.ofile.write(f"<!-- _class: {current_slide_class} -->\n\n")
-            self._put_elements_on_slide(all_elements, is_continued_slide=False)
 
+            # Determine if slide qualifies for splitting based on its overall content metrics
+            initial_split_qualification = False
+            if current_slide_class in ["smaller", "smallest"]:
+                if text_lines_for_avg > 0:
+                    avg_line_length = text_chars_for_avg / text_lines_for_avg
+                    if avg_line_length < 40:
+                        initial_split_qualification = True
+            
+            # Identify title and content that would go into columns
+            main_title_element: Optional[SlideElement] = None
+            content_for_columns: List[SlideElement] = all_elements
+
+            if all_elements and all_elements[0].type == ElementType.Title:
+                main_title_element = all_elements[0]
+                content_for_columns = all_elements[1:] # Elements after the title
+
+            # Final decision: must qualify AND have enough elements left for columns
+            actually_split_columns = initial_split_qualification and len(content_for_columns) >= 2
+
+            # Determine effective slide class
+            effective_slide_class = current_slide_class
+            if actually_split_columns:
+                # If it was going to be 'smaller' or 'smallest' and we are splitting,
+                # make it 'small' as content is now distributed.
+                if current_slide_class in ["smaller", "smallest"]:
+                    effective_slide_class = "small"
+            
+            # Output class directive (if any)
+            if effective_slide_class:
+                self.ofile.write(f"<!-- _class: {effective_slide_class} -->\n\n")
+
+            # Output the main title (if it was identified and separated)
+            if main_title_element:
+                self._put_elements_on_slide([main_title_element], is_continued_slide=False)
+
+            # Output the remaining content, either in columns or as a single block
+            if actually_split_columns:
+                # Split content_for_columns and output in two divs
+                num_in_first_col = (len(content_for_columns) + 1) // 2
+                first_half_elements = content_for_columns[:num_in_first_col]
+                second_half_elements = content_for_columns[num_in_first_col:]
+
+                self.ofile.write('<div class="columns">\n<div>\n\n')
+                self._put_elements_on_slide(first_half_elements, is_continued_slide=False)
+                self.ofile.write('\n</div>\n<div>\n\n')
+                self._put_elements_on_slide(second_half_elements, is_continued_slide=False)
+                self.ofile.write('\n</div>\n</div>\n\n')
+            else:
+                # Not splitting columns (either didn't qualify or not enough content after title).
+                # Output content_for_columns as a single block.
+                # This list contains all elements if no title was found at the start,
+                # or elements after the title if a title was found and already printed.
+                if content_for_columns: # Only print if there's content remaining
+                    self._put_elements_on_slide(content_for_columns, is_continued_slide=False)
+            
             if not self.config.disable_notes and slide.notes:
                 self.ofile.write("<!--\n")
                 for note_line in slide.notes:
