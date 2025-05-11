@@ -112,6 +112,7 @@ class TextStyle(BaseModel):
     is_strong: bool = False
     color_rgb: Optional[tuple[int, int, int]] = None
     hyperlink: Optional[str] = None
+    is_code: bool = False
 
 
 class TextRun(BaseModel):
@@ -174,7 +175,13 @@ class TableElement(BaseElement):
     content: List[List[List[TextRun]]]  # rows -> cols -> rich text
 
 
-SlideElement = Union[TitleElement, ListItemElement, ParagraphElement, ImageElement, TableElement]
+class CodeBlockElement(BaseElement):
+    type: ElementType = ElementType.CodeBlock
+    content: str 
+    language: Optional[str] = None
+
+
+SlideElement = Union[TitleElement, ListItemElement, ParagraphElement, ImageElement, TableElement, CodeBlockElement]
 
 
 class SlideType(str, Enum):

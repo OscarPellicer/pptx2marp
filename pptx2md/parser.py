@@ -43,12 +43,24 @@ from pptx2md.types import (
     TextRun,
     TextStyle,
     TitleElement,
+    CodeBlockElement,
 )
 from pptx2md.utils import emu_to_px # Assuming emu_to_px is now in utils
 
 logger = logging.getLogger(__name__)
 
 picture_count = 0
+
+
+def is_code_font(font) -> bool:
+    """Checks if the font is a common monospaced/code font."""
+    if font and font.name:
+        # Common monospaced fonts; .lower() for case-insensitivity.
+        # Add more as needed.
+        monospaced_fonts = ["consolas", "courier new", "menlo", "monaco", "lucida console", "dejavu sans mono"]
+        if font.name.lower() in monospaced_fonts:
+            return True
+    return False
 
 
 def is_title(shape):
@@ -113,6 +125,8 @@ def get_text_runs(para) -> List[TextRun]:
             result.style.is_strong = True
         if run.font.color.type == MSO_COLOR_TYPE.RGB:
             result.style.color_rgb = run.font.color.rgb
+        if is_code_font(run.font):
+            result.style.is_code = True
         runs.append(result)
     return runs
 
@@ -132,19 +146,83 @@ def process_title(config: ConversionConfig, shape, slide_idx) -> TitleElement:
 
 def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Union[ListItemElement, ParagraphElement]]:
     results = []
-    if is_list_block(shape):
+    
+    if not shape.has_text_frame or not shape.text_frame.paragraphs:
+        return results
+
+    # Determine if the shape's substantive content is entirely code-styled.
+    all_substantive_content_is_code = True
+    has_any_substantive_content = False
+
+    temp_shape_runs_for_code_check: List[TextRun] = []
+    for para in shape.text_frame.paragraphs:
+        # We need to get runs with their styles to check .is_code
+        para_runs = get_text_runs(para)
+        if not para_runs and not para.text.strip(): # Paragraph is empty or only whitespace
+            # This paragraph contributes to structure but not to substantive content check
+            # unless it's the *only* thing in the shape.
+            # We'll add an empty code run for it later if shape is deemed code.
+            continue 
+
+        for run in para_runs:
+            if run.text.strip(): # Substantive text
+                has_any_substantive_content = True
+                if not run.style.is_code:
+                    all_substantive_content_is_code = False
+                    break # Found non-code substantive text
+            # Non-substantive runs (whitespace) don't break the "all code" criteria
+        if not all_substantive_content_is_code:
+            break
+    
+    # If there's no substantive content at all, it cannot be "all code" in a meaningful way.
+    if not has_any_substantive_content:
+        all_substantive_content_is_code = False
+
+
+    if all_substantive_content_is_code:
+        # This shape's substantive content is entirely code-styled.
+        # Process all its paragraphs as ParagraphElements (for potential merging into CodeBlockElement).
         for para in shape.text_frame.paragraphs:
-            if para.text.strip() == '':
-                continue
-            text = get_text_runs(para)
-            results.append(ListItemElement(content=text, level=para.level))
+            para_runs = get_text_runs(para) # Re-get runs with style
+            # If paragraph is empty (no runs after get_text_runs, e.g. only filtered chars, or truly empty para.text),
+            # create a ParagraphElement with a single empty, code-styled TextRun to preserve the line.
+            if not para_runs and not para.text: # Truly empty line
+                 results.append(ParagraphElement(content=[TextRun(text="", style=TextStyle(is_code=True))]))
+            elif para_runs: # Paragraph has runs (could be actual code, or just whitespace forming a run)
+                 # Ensure all runs within this paragraph are also marked as code if the whole shape is code.
+                 # This might be redundant if get_text_runs already did it perfectly, but ensures consistency here.
+                updated_para_runs = [
+                    TextRun(text=r.text, style=TextStyle(is_code=True, 
+                                                        hyperlink=r.style.hyperlink, # Preserve links if any
+                                                        color_rgb=r.style.color_rgb)) # Preserve color if any
+                    for r in para_runs
+                ]
+                results.append(ParagraphElement(content=updated_para_runs))
+            # else: para.text might have content but get_text_runs yielded nothing (e.g. filtered chars).
+            # This case should ideally not happen if get_text_runs is robust.
+            # If it does, such a paragraph is currently skipped.
+            # To ensure an empty line, we can add:
+            elif not para_runs and para.text.isspace(): # Whitespace only line
+                results.append(ParagraphElement(content=[TextRun(text=para.text, style=TextStyle(is_code=True))]))
+
+
     else:
-        # paragraph block
+        # Not an entirely code-styled shape. Fall back to list/paragraph detection.
+        is_list = is_list_block(shape)
         for para in shape.text_frame.paragraphs:
-            if para.text.strip() == '':
+            # For non-code content, skip paragraphs that are visually empty.
+            if not para.text.strip(): 
                 continue
-            text = get_text_runs(para)
-            results.append(ParagraphElement(content=text))
+            
+            text_runs = get_text_runs(para)
+            if not text_runs: # If, after processing, text_runs is empty
+                continue
+
+            if is_list:
+                results.append(ListItemElement(content=text_runs, level=para.level))
+            else:
+                results.append(ParagraphElement(content=text_runs))
+                
     return results
 
 
@@ -383,34 +461,90 @@ def ungroup_shapes(shapes) -> List[SlideElement]:
 
 
 def process_shapes(config: ConversionConfig, current_shapes, slide_id: int) -> List[SlideElement]:
-    results = []
+    initial_elements: List[SlideElement] = []
     for shape in current_shapes:
         if is_title(shape):
-            results.append(process_title(config, shape, slide_id))
+            initial_elements.append(process_title(config, shape, slide_id))
         elif is_text_block(config, shape):
-            results.extend(process_text_blocks(config, shape, slide_id))
+            initial_elements.extend(process_text_blocks(config, shape, slide_id))
         elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
             try:
                 pic = process_picture(config, shape, slide_id)
                 if pic:
-                    results.append(pic)
+                    initial_elements.append(pic)
             except AttributeError as e:
                 logger.warning(f'Failed to process picture, skipped: {e}')
         elif shape.shape_type == MSO_SHAPE_TYPE.TABLE:
             table = process_table(config, shape, slide_id)
             if table:
-                results.append(table)
+                initial_elements.append(table)
         else:
             try:
                 ph = shape.placeholder_format
                 if ph.type == PP_PLACEHOLDER.OBJECT and hasattr(shape, "image") and getattr(shape, "image"):
                     pic = process_picture(config, shape, slide_id)
                     if pic:
-                        results.append(pic)
+                        initial_elements.append(pic)
             except:
                 pass
 
-    return results
+    # if slide_id == 39: breakpoint()
+    processed_elements: List[SlideElement] = []
+    i = 0
+    while i < len(initial_elements):
+        current_element = initial_elements[i]
+        
+        # Check if current element is the start of a potential code sequence
+        if isinstance(current_element, ParagraphElement) and \
+           current_element.content and \
+           all(run.style.is_code for run in current_element.content):
+            
+            # Collect all consecutive paragraphs where all runs are code-styled
+            consecutive_code_paras: List[ParagraphElement] = []
+            scan_idx = i
+            while scan_idx < len(initial_elements) and \
+                  isinstance(initial_elements[scan_idx], ParagraphElement) and \
+                  initial_elements[scan_idx].content and \
+                  all(run.style.is_code for run in initial_elements[scan_idx].content):
+                consecutive_code_paras.append(initial_elements[scan_idx])
+                scan_idx += 1
+            
+            # Now decide how to treat this sequence
+            if len(consecutive_code_paras) == 1:
+                single_para_element = consecutive_code_paras[0]
+                # Extract raw text content (without any formatting from TextRun)
+                raw_text_content = "".join(run.text for run in single_para_element.content)
+                
+                # If it's a single line, keep as ParagraphElement for inline code formatting
+                if '\n' not in raw_text_content.strip(): # Also strip to check if it's just newlines
+                    processed_elements.append(single_para_element) 
+                    i += 1 # Advance by 1 (the single paragraph processed)
+                else: # Single paragraph, but multi-line: treat as a CodeBlock
+                    code_block = CodeBlockElement(content=raw_text_content, 
+                                                  position=single_para_element.position,
+                                                  language=None) 
+                    processed_elements.append(code_block)
+                    i += 1 # Advance by 1
+            
+            elif len(consecutive_code_paras) > 1: # Multiple consecutive code paragraphs, merge into CodeBlock
+                code_lines_texts = ["".join(run.text for run in para.content) for para in consecutive_code_paras]
+                full_code_content = "\n".join(code_lines_texts)
+                first_para_position = consecutive_code_paras[0].position
+                
+                code_block = CodeBlockElement(content=full_code_content, 
+                                              position=first_para_position,
+                                              language=None) 
+                processed_elements.append(code_block)
+                i += len(consecutive_code_paras) # Advance by the number of merged paragraphs
+            
+            # else: # Should not happen if the outer 'if' condition was met (len would be at least 1)
+            #   pass
+
+        else: # Not a code paragraph, or not the start of a sequence of code paragraphs
+            processed_elements.append(current_element)
+            i += 1
+            
+    return processed_elements
 
 
 def parse(config: ConversionConfig, prs: Presentation) -> ParsedPresentation:

@@ -69,6 +69,8 @@ class Formatter:
                         self.put_image(element.path, element.width)
                     case ElementType.Table:
                         self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
+                    case ElementType.CodeBlock:
+                        self.put_code_block(element.content, element.language)
                 last_element = element
 
             if not self.config.disable_notes and slide.notes:
@@ -97,26 +99,40 @@ class Formatter:
         self.put_para('')
 
     def get_formatted_runs(self, runs: List[TextRun]):
-        res = ''
+        res_parts = []
         for run in runs:
             text = run.text
-            if text == '':
-                continue
+            # Do not skip empty runs here. The final .strip() handles overall whitespace.
 
-            if not self.config.disable_escaping:
-                text = self.get_escaped(text)
+            if run.style.is_code:
+                # Pass the raw run text to get_inline_code.
+                # It should not do its own stripping or escaping.
+                formatted_text = self.get_inline_code(text)
+            else:
+                formatted_text = text # Start with raw text for non-code runs
+                if not self.config.disable_escaping:
+                    # Perform escaping only on non-code text.
+                    formatted_text = self.get_escaped(formatted_text)
 
-            if run.style.hyperlink:
-                text = self.get_hyperlink(text, run.style.hyperlink)
-            if run.style.is_accent:
-                text = self.get_accent(text)
-            elif run.style.is_strong:
-                text = self.get_strong(text)
-            if run.style.color_rgb and not self.config.disable_color:
-                text = self.get_colored(text, run.style.color_rgb)
+                # Styling applied sequentially. Order might matter depending on desired outcome.
+                if run.style.hyperlink:
+                    formatted_text = self.get_hyperlink(formatted_text, run.style.hyperlink)
+                if run.style.is_accent:
+                    formatted_text = self.get_accent(formatted_text)
+                elif run.style.is_strong: 
+                    formatted_text = self.get_strong(formatted_text)
+                if run.style.color_rgb and not self.config.disable_color:
+                    formatted_text = self.get_colored(formatted_text, run.style.color_rgb)
+            
+            res_parts.append(formatted_text)
+        
+        # Strip only at the very end of processing all runs for an element.
+        all_text = "".join(res_parts).strip()
+        
+        # TODO: Do this better.If text contains `` remove it
+        all_text = all_text.replace('``', '')
 
-            res += text
-        return res.strip()
+        return all_text
 
     def put_para(self, text):
         pass
@@ -126,6 +142,47 @@ class Formatter:
 
     def put_table(self, table):
         pass
+
+    def put_code_block(self, code: str, language: Optional[str]):
+        pass
+
+    def get_inline_code(self, text: str) -> str:
+        """Formats text as inline code. Does not strip or escape input text.
+           Handles literal backticks within the text by using a longer fence.
+        """
+        if not text: # If the original run text was empty.
+            return ""
+
+        # Find the longest sequence of backticks in the text
+        longest_backtick_sequence = 0
+        current_backtick_sequence = 0
+        for char in text:
+            if char == '`':
+                current_backtick_sequence += 1
+            else:
+                longest_backtick_sequence = max(longest_backtick_sequence, current_backtick_sequence)
+                current_backtick_sequence = 0
+        longest_backtick_sequence = max(longest_backtick_sequence, current_backtick_sequence)
+
+        # The fence should be one longer than the longest sequence found
+        fence_len = longest_backtick_sequence + 1
+        fence = '`' * fence_len
+
+        # If the text starts or ends with a backtick, or is all backticks,
+        # and the chosen fence is just one backtick,
+        # then a space is needed to disambiguate (CommonMark spec).
+        # Example: ` `` ` vs `` ` ``. If text is '`a`' and fence is '`', then '` `a` `'
+        # However, if fence_len > 1, this space padding is generally not needed.
+        # For simplicity and robustness with `fence_len > 1`, just add fence.
+        # If `text` is just '`', `fence_len` will be 2, result "`` ` ``".
+        # If `text` is 'a`b', `fence_len` will be 2, result "``a`b``".
+        
+        # A common strategy for CommonMark compliance with content starting/ending with backticks
+        # or being all backticks, when the fence is a single backtick:
+        if fence_len == 1 and (text.startswith('`') or text.endswith('`') or text.isspace()):
+             return f"{fence} {text} {fence}"
+        
+        return f"{fence}{text}{fence}"
 
     def get_accent(self, text):
         pass
@@ -156,7 +213,7 @@ class MarkdownFormatter(Formatter):
     # write outputs to markdown
     def __init__(self, config: ConversionConfig):
         super().__init__(config)
-        self.esc_re1 = re.compile(r'([\\\*`!_\{\}\[\]\(\)#\+-\.])')
+        self.esc_re1 = re.compile(r'([\\\*`!_\{\}\[\]\(\)#\+-\.])')  
         self.esc_re2 = re.compile(r'(<[^>]+>)')
 
     def put_title(self, text, level):
@@ -179,6 +236,10 @@ class MarkdownFormatter(Formatter):
         self.ofile.write(gen_table_row(table[0]) + '\n')
         self.ofile.write(gen_table_row([':-:' for _ in table[0]]) + '\n')
         self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
+
+    def put_code_block(self, code: str, language: Optional[str]):
+        lang_tag = language if language else ""
+        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def get_accent(self, text):
         return ' _' + text + '_ '
@@ -221,6 +282,20 @@ class WikiFormatter(Formatter):
             self.ofile.write(f'<img src="{path}" />\n\n')
         else:
             self.ofile.write(f'<img src="{path}" width={max_width}px />\n\n')
+
+    def put_code_block(self, code: str, language: Optional[str]):
+        # For TiddlyWiki, ```language ... ``` or <pre><code class="language-xxx">
+        lang_class = f' class="language-{language}"' if language else ""
+        # Ensure code content is not overly escaped if it contains HTML-like syntax itself.
+        # The content is raw string, so it's up to the formatter.
+        # For safety, let's HTML escape the code content itself if putting inside <pre><code>.
+        # However, standard markdown ``` doesn't typically HTML escape the content.
+        # Let's stick to ``` for wiki too, as many modern wikis support it.
+        lang_tag = language if language else ""
+        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        # Alternative for more basic wikis:
+        # import html
+        # self.ofile.write(f'<pre><code{lang_class}>\n{html.escape(code.strip())}\n</code></pre>\n\n')
 
     def get_accent(self, text):
         return ' __' + text + '__ '
@@ -268,6 +343,10 @@ class MadokoFormatter(Formatter):
             self.ofile.write('~ Figure {caption: image caption}\n')
             self.ofile.write('![](%s){width:%spx;}\n' % (path, max_width))
             self.ofile.write('~\n\n')
+
+    def put_code_block(self, code: str, language: Optional[str]):
+        lang_tag = language if language else ""
+        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def get_accent(self, text):
         return ' _' + text + '_ '
@@ -319,7 +398,7 @@ class QuartoFormatter(Formatter):
                                 # skip if the title is the same as the last one
                                 # Allow for repeated slide titles - One or more - Add (cont.) to the title
                                 if self.config.keep_similar_titles:
-                                    self.put_title(f'{element.content} (cont.)', element.level)
+                                    self.put_title(f'{element.content} (cont.)', element.level) 
                             else:
                                 self.put_title(element.content, element.level)
                             last_title = element
@@ -333,6 +412,10 @@ class QuartoFormatter(Formatter):
                         self.put_image(element.path, element.width)
                     case ElementType.Table:
                         self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
+                    case ElementType.CodeBlock:
+                        code_content = getattr(element, 'content', '')
+                        code_lang = getattr(element, 'language', None)
+                        self.put_code_block(code_content, code_lang)
                 last_element = element
 
         for slide_idx, slide in enumerate(presentation_data.slides):
@@ -402,6 +485,10 @@ format:
         self.ofile.write(gen_table_row([':-:' for _ in table[0]]) + '\n')
         self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
+    def put_code_block(self, code: str, language: Optional[str]):
+        lang_tag = language if language else ""
+        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+
     def get_accent(self, text):
         return ' _' + text + '_ '
 
@@ -441,8 +528,8 @@ class MarpFormatter(Formatter):
     # write outputs to marp markdown
     def __init__(self, config: ConversionConfig):
         super().__init__(config)
-        self.esc_re1 = re.compile(r'([\\\*`!_\{\}\[\]\(\)#\+-\.])')
-        # self.esc_re2 = re.compile(r'(<[^>]+>)') # Keep commented out for Marp to allow HTML
+        self.esc_re1 = re.compile(r'([\|\*`])')
+        self.esc_re2 = re.compile(r'(<[^>]+>)')
         self.last_title_info: Optional[Tuple[str, int]] = None # For managing (cont.) and fuzzy match
 
     def put_header(self):
@@ -483,10 +570,13 @@ img[alt~="right"] {
 
 ''')
 
-    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int]:
-        """Calculates number of semantic lines and total characters."""
+    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int]]:
+        """Calculates number of semantic lines, total characters, and max image dimensions."""
         line_count = 0
         char_count = 0
+        max_image_width: Optional[int] = 0
+        max_image_height: Optional[int] = 0
+
         for element in elements_list:
             if element.type == ElementType.Title:
                 line_count += 1
@@ -498,21 +588,34 @@ img[alt~="right"] {
                     for run in element.content:
                         char_count += len(run.text)
             elif element.type == ElementType.Paragraph:
-                line_count += 1
+                line_count += 1 # Each paragraph is at least one line
                 if isinstance(element.content, list): # List[TextRun]
-                    # Estimate lines within a paragraph by counting newlines, plus one for the para itself
                     para_text = "".join(run.text for run in element.content)
                     char_count += len(para_text)
-                    # line_count += para_text.count('\n') # More accurate line count if needed
-                elif isinstance(element.content, str): # Should be List[TextRun]
-                     char_count += len(element.content)
+                    # line_count += para_text.count('\n') # More accurate internal line count if needed
+                elif isinstance(element.content, str): 
+                     char_count += len(element.content) # Should be List[TextRun]
 
-            # Assuming ElementType.CodeBlock content is a simple string
-            elif hasattr(ElementType, 'CodeBlock') and element.type == ElementType.CodeBlock:
+            elif element.type == ElementType.CodeBlock:
                 line_count += (element.content.count('\n') + 1) if element.content else 1
                 char_count += len(element.content)
-            # Image and Table don't directly contribute to this line count heuristic for font size
-        return line_count, char_count
+            
+            elif element.type == ElementType.Table:
+                if element.content: # content is List[List[List[TextRun]]]
+                    line_count += len(element.content) # Add number of rows
+                    for row in element.content:
+                        for cell_runs in row:
+                            for run in cell_runs:
+                                char_count += len(run.text)
+            
+            elif element.type == ElementType.Image:
+                # Consider image presence as contributing to slide density, but not lines/chars
+                if element.display_width_px is not None:
+                    max_image_width = max(max_image_width or 0, element.display_width_px)
+                if element.display_height_px is not None:
+                    max_image_height = max(max_image_height or 0, element.display_height_px)
+
+        return line_count, char_count, max_image_width if max_image_width > 0 else None, max_image_height if max_image_height > 0 else None
 
     def _put_elements_on_slide(self, elements: List[SlideElement], is_continued_slide: bool = False):
         """Helper to output a list of elements. `last_title_info` is now an instance var."""
@@ -553,7 +656,7 @@ img[alt~="right"] {
                             
                             if is_similar_to_last:
                                 if self.config.keep_similar_titles:
-                                    effective_title = f'{title_text} (cont.)'
+                                    effective_title = f'{title_text}'# (cont.)
                                     self.put_title(effective_title, element.level)
                                     self.last_title_info = (effective_title, element.level)
                                 # else skip
@@ -571,8 +674,7 @@ img[alt~="right"] {
                     self.put_image(element)
                 case ElementType.Table:
                     self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
-                case _ if hasattr(ElementType, 'CodeBlock') and element.type == ElementType.CodeBlock:
-                    # Assumption: element.content (str), element.language (Optional[str])
+                case ElementType.CodeBlock:
                     code_content = getattr(element, 'content', '')
                     code_lang = getattr(element, 'language', None)
                     self.put_code_block(code_content, code_lang)
@@ -593,8 +695,6 @@ img[alt~="right"] {
             marp_slide_counter += 1
 
             all_elements = []
-            original_slide_title_text: Optional[str] = None
-            original_slide_title_level: Optional[int] = None
 
             if slide.type == SlideType.General:
                 all_elements = slide.elements
@@ -606,15 +706,7 @@ img[alt~="right"] {
                     self.ofile.write("\n---\n\n")
                  continue
 
-
-            # Try to get the main title of the original slide for "(Continued)" logic
-            first_title_el = next((el for el in all_elements if el.type == ElementType.Title), None)
-            if first_title_el:
-                original_slide_title_text = first_title_el.content.strip() if isinstance(first_title_el.content, str) else ""
-                original_slide_title_level = first_title_el.level
-
-
-            line_count, _ = self._get_slide_content_metrics(all_elements)
+            line_count, char_count, max_img_w, max_img_h = self._get_slide_content_metrics(all_elements)
 
             def get_slide_class(lc: int) -> Optional[str]:
                 if lc > LINES_SMALLER_MAX: return "smallest"
@@ -622,83 +714,21 @@ img[alt~="right"] {
                 if lc > LINES_NORMAL_MAX: return "small"
                 return None
 
-            # Splitting logic
-            if line_count > LINES_SPLIT_TRIGGER and len(all_elements) > 1: # Split if too many lines and multiple elements
-                split_at_index = len(all_elements) // 2
-                # Try to split after a paragraph or title, not in middle of list items if possible (simple split for now)
-                # A more sophisticated split would find a natural break.
-                
-                elements_part1 = all_elements[:split_at_index]
-                elements_part2 = all_elements[split_at_index:]
+            current_slide_class = get_slide_class(line_count)
+            if current_slide_class:
+                self.ofile.write(f"<!-- _class: {current_slide_class} -->\n\n")
+            self._put_elements_on_slide(all_elements, is_continued_slide=False)
 
-                if not elements_part1: # safety if all_elements had only 1 item but line_count was high
-                    elements_part1 = elements_part2
-                    elements_part2 = []
-
-
-                # Part 1
-                part1_line_count, _ = self._get_slide_content_metrics(elements_part1)
-                slide_class_part1 = get_slide_class(part1_line_count)
-                if slide_class_part1:
-                    self.ofile.write(f"<!-- _class: {slide_class_part1} -->\n\n")
-                self._put_elements_on_slide(elements_part1, is_continued_slide=False)
-                
-                # Notes are typically for the whole original slide. Output with the first part.
-                if not self.config.disable_notes and slide.notes:
-                    self.ofile.write("<!--\n")
-                    for note_line in slide.notes:
-                        self.ofile.write(f"{note_line}\n")
-                    self.ofile.write("-->\n\n")
-
-                self.ofile.write("\n---\n\n") # Marp slide separator for the new slide
-                marp_slide_counter +=1
-
-                # Part 2
-                part2_line_count, _ = self._get_slide_content_metrics(elements_part2)
-                slide_class_part2 = get_slide_class(part2_line_count)
-                if slide_class_part2:
-                    self.ofile.write(f"<!-- _class: {slide_class_part2} -->\n\n")
-                
-                if original_slide_title_text and original_slide_title_level:
-                    continued_title = f"{original_slide_title_text} (Continued)"
-                    self.put_title(continued_title, original_slide_title_level)
-                    self.last_title_info = (continued_title, original_slide_title_level) 
-                
-                if elements_part2:
-                    # If the first element of part2 is the original title, _put_elements_on_slide might skip it.
-                    # This needs careful handling. Let's assume _put_elements_on_slide will render content
-                    # other than the main continued title which we just put.
-                    # A quick fix: if elements_part2[0] was the original_slide_title_el, pass elements_part2[1:]
-                    if elements_part2 and first_title_el and elements_part2[0] == first_title_el and original_slide_title_text:
-                         self._put_elements_on_slide(elements_part2[1:], is_continued_slide=True)
-                    else:
-                         self._put_elements_on_slide(elements_part2, is_continued_slide=True)
-
-            else: # No splitting
-                current_slide_class = get_slide_class(line_count)
-                if current_slide_class:
-                    self.ofile.write(f"<!-- _class: {current_slide_class} -->\n\n")
-                self._put_elements_on_slide(all_elements, is_continued_slide=False)
-
-                if not self.config.disable_notes and slide.notes:
-                    self.ofile.write("<!--\n")
-                    for note_line in slide.notes:
-                        self.ofile.write(f"{note_line}\n")
-                    self.ofile.write("-->\n\n")
+            if not self.config.disable_notes and slide.notes:
+                self.ofile.write("<!--\n")
+                for note_line in slide.notes:
+                    self.ofile.write(f"{note_line}\n")
+                self.ofile.write("-->\n\n")
 
             # Add slide separator if not the very last conceptual slide
-            # This needs to be smarter if num_total_slides is for original slides, and we are splitting.
-            # For now, assume marp_slide_counter reflects actual Marp slides being output.
-            # The check `slide_idx < len(presentation_data.slides) - 1` is for original slides.
-            # A better check is needed if the last original slide was split.
-            # Let's always put one, and rely on Marp to ignore last one if empty.
-            # Or, only if there are more original slides OR if current slide was split AND it was the last original one.
             is_last_original_slide = (slide_idx == num_total_slides - 1)
-            was_split = (line_count > LINES_SPLIT_TRIGGER and len(all_elements) > 1)
-
-            if not (is_last_original_slide and not was_split) : # Add --- if not the true end
+            if not (is_last_original_slide) : # Add --- if not the true end
                  self.ofile.write("\n---\n\n")
-
 
         self.close()
 
@@ -715,15 +745,18 @@ img[alt~="right"] {
         alt = element.alt_text if element.alt_text else ""
         quoted_path = urllib.parse.quote(element.path)
         
-        # Keywords for Marp alt text, including w:, h:, bg, position etc.
         marp_alt_text_keywords = []
         
+        # Use configured slide dimensions, falling back to defaults, for scaling calculations.
         original_slide_width_px = self.config.slide_width_px or DEFAULT_SLIDE_WIDTH_PX
         original_slide_height_px = self.config.slide_height_px or DEFAULT_SLIDE_HEIGHT_PX
 
+        # Get image's display dimensions from PowerPoint.
         ppt_display_width = element.display_width_px
         ppt_display_height = element.display_height_px
 
+        # If display width is not available from PPT, but a default image width is configured,
+        # use it and calculate corresponding height maintaining aspect ratio (if available).
         if ppt_display_width is None and self.config.image_width is not None:
             ppt_display_width = self.config.image_width
             if element.original_width_px and element.original_height_px and element.original_width_px > 0:
@@ -733,6 +766,8 @@ img[alt~="right"] {
         scaled_marp_display_width = None
         scaled_marp_display_height = None
 
+        # Scale image dimensions from original slide context to Marp target dimensions.
+        # Prioritize scaling based on width, then height, maintaining aspect ratio if possible.
         if ppt_display_width is not None and original_slide_width_px > 0:
             width_scale_factor = MARP_TARGET_WIDTH_PX / original_slide_width_px
             scaled_marp_display_width = int(round(ppt_display_width * width_scale_factor))
@@ -741,10 +776,11 @@ img[alt~="right"] {
                element.original_width_px > 0 and scaled_marp_display_width > 0:
                 image_aspect_ratio = element.original_height_px / element.original_width_px
                 scaled_marp_display_height = int(round(scaled_marp_display_width * image_aspect_ratio))
-            elif ppt_display_height is not None:
+            elif ppt_display_height is not None: # If aspect ratio unknown, scale height by same factor.
                 scaled_marp_display_height = int(round(ppt_display_height * width_scale_factor))
         elif ppt_display_height is not None and original_slide_height_px > 0 and \
              element.original_width_px and element.original_height_px and element.original_height_px > 0 :
+            # Fallback to scaling based on height if width-based scaling wasn't possible/applicable.
             height_scale_factor = MARP_TARGET_HEIGHT_PX / original_slide_height_px
             scaled_marp_display_height = int(round(ppt_display_height * height_scale_factor))
             if element.original_width_px > 0 and element.original_height_px > 0 : 
@@ -754,14 +790,13 @@ img[alt~="right"] {
         current_display_width = scaled_marp_display_width
         current_display_height = scaled_marp_display_height
         
+        # Add Marp sizing keywords (w:, h:) if dimensions are determined.
         if current_display_width is not None and current_display_width > 0:
             marp_alt_text_keywords.append(f'w:{current_display_width}px') 
-        if current_display_height is not None and current_display_height > 0:
-            marp_alt_text_keywords.append(f'h:{current_display_height}px')
+        # if current_display_height is not None and current_display_height > 0:
+        #     marp_alt_text_keywords.append(f'h:{current_display_height}px')
 
-        # Rotation is not applied as we are not using HTML img tags.
-        # If element.rotation is significant, it's visually lost.
-
+        # Determine position hint (left, center, right) based on scaled image position and size.
         slide_width_for_hinting = MARP_TARGET_WIDTH_PX
         position_hint = None
         
@@ -771,31 +806,35 @@ img[alt~="right"] {
 
         if scaled_left_px is not None and current_display_width is not None:
             image_center_x = scaled_left_px + (current_display_width / 2)
-            slide_center_x = slide_width_for_hinting / 2
-            center_threshold = slide_width_for_hinting * 0.10 
+            # slide_center_x = slide_width_for_hinting / 2
+            # center_threshold = slide_width_for_hinting * 0.10 # 10% threshold for centering
             
+            # Define boundaries for "left" and "right" thirds of the slide.
             left_third_boundary = slide_width_for_hinting / 3
             right_third_boundary = 2 * slide_width_for_hinting / 3
 
-            if abs(image_center_x - slide_center_x) < center_threshold:
+            if left_third_boundary < image_center_x < right_third_boundary:
                 position_hint = "center" 
-            elif (scaled_left_px + current_display_width) < left_third_boundary + center_threshold : 
+            elif image_center_x < left_third_boundary: 
                 position_hint = "left"
-            elif scaled_left_px > right_third_boundary - center_threshold : 
+            elif image_center_x > right_third_boundary: 
                 position_hint = "right"
 
-        is_background_candidate = False
-        if current_display_width is not None and current_display_height is not None:
-            if current_display_width >= slide_width_for_hinting * 0.75 and \
-               current_display_height >= MARP_TARGET_HEIGHT_PX * 0.75:
-                is_background_candidate = True
-                if position_hint == "left":
-                    position_hint = "bg left"
-                elif position_hint == "right":
-                    position_hint = "bg right"
-                else: 
-                    position_hint = "bg" 
+        # Check if the image is large enough to be a candidate for a background image.
+        # is_background_candidate = False
+        # if current_display_width is not None and current_display_height is not None:
+        #     if current_display_width >= slide_width_for_hinting * 0.65 and \
+        #        current_display_height >= MARP_TARGET_HEIGHT_PX * 0.65:
+        #         is_background_candidate = True
+        #         # If it's a background candidate, prepend "bg" to its position hint.
+        #         if position_hint == "left":
+        #             position_hint = "bg left"
+        #         elif position_hint == "right":
+        #             position_hint = "bg right"
+        #         else: # Default to "bg" if centered or no specific L/R hint.
+        #             position_hint = "bg" 
 
+        # Use the calculated position_hint, or fallback to a hint provided on the element itself.
         effective_position_hint = position_hint or getattr(element, 'position_hint', None)
         
         has_bg_keyword = False
@@ -803,49 +842,45 @@ img[alt~="right"] {
             if effective_position_hint == "center":
                 marp_alt_text_keywords.append("center") 
             elif effective_position_hint == "left":
-                 marp_alt_text_keywords.append("left") # For CSS: img[alt~="left"]
+                 marp_alt_text_keywords.append("left")
             elif effective_position_hint == "right":
-                 marp_alt_text_keywords.append("right") # For CSS: img[alt~="right"]
-            elif effective_position_hint.startswith("bg"):
-                bg_directive_parts = effective_position_hint.split(" ") 
-                marp_alt_text_keywords.extend(bg_directive_parts)
-                has_bg_keyword = True
-                # Remove w: and h: if it's a background image, Marp handles sizing.
-                marp_alt_text_keywords = [kw for kw in marp_alt_text_keywords if not (kw.startswith("w:") or kw.startswith("h:"))]
+                 marp_alt_text_keywords.append("right")
+            # elif effective_position_hint.startswith("bg"):
+            #     # For background images, add "bg" and any directional keywords (e.g., "left", "right").
+            #     bg_directive_parts = effective_position_hint.split(" ") 
+            #     marp_alt_text_keywords.extend(bg_directive_parts)
+            #     has_bg_keyword = True
+            #     # Marp handles sizing for background images; remove w: and h: keywords.
+            #     marp_alt_text_keywords = [kw for kw in marp_alt_text_keywords if not (kw.startswith("w:") or kw.startswith("h:"))]
         
-        # Construct final alt text string for Marp
-        # Order: bg/positioning keywords, then original alt text, then sizing keywords.
-        
+        # Construct the final alt text string for Marp.
+        # Order is important: [bg/positioning] [original alt text] [w:/h: sizing keywords (if not bg)].
         ordered_alt_keywords = []
-        # Add specific Marp keywords first (bg, positioning)
-        if "bg" in marp_alt_text_keywords: ordered_alt_keywords.append("bg")
-        if "bg left" in marp_alt_text_keywords: ordered_alt_keywords = ["bg", "left"] # replace if more specific
-        if "bg right" in marp_alt_text_keywords: ordered_alt_keywords = ["bg", "right"] # replace if more specific
         
-        # Add "center", "left", "right" for non-bg images if present
+        # Add "bg" and its associated positioning keywords first.
+        if "bg" in marp_alt_text_keywords: ordered_alt_keywords.append("bg")
+        # Handle specific "bg left" and "bg right" by ensuring correct order.
+        if "bg left" in " ".join(marp_alt_text_keywords): ordered_alt_keywords = ["bg", "left"] 
+        elif "bg right" in " ".join(marp_alt_text_keywords): ordered_alt_keywords = ["bg", "right"]
+        
+        # Add non-background positioning keywords ("center", "left", "right").
         if not has_bg_keyword:
-            if "center" in marp_alt_text_keywords: ordered_alt_keywords.append("center")
-            if "left" in marp_alt_text_keywords: ordered_alt_keywords.append("left")
-            if "right" in marp_alt_text_keywords: ordered_alt_keywords.append("right")
+            if "center" in marp_alt_text_keywords and "center" not in ordered_alt_keywords: ordered_alt_keywords.append("center")
+            if "left" in marp_alt_text_keywords and "left" not in ordered_alt_keywords: ordered_alt_keywords.append("left")
+            if "right" in marp_alt_text_keywords and "right" not in ordered_alt_keywords: ordered_alt_keywords.append("right")
 
-        # Add the original alt text
         if alt:
             ordered_alt_keywords.append(alt)
             
-        # Add sizing keywords (w:, h:), unless it's a background image
+        # Add sizing keywords (w:, h:) last, unless it's a background image.
         if not has_bg_keyword:
             for kw in marp_alt_text_keywords:
-                if kw.startswith("w:") or kw.startswith("h:"):
+                if (kw.startswith("w:") or kw.startswith("h:")) and kw not in ordered_alt_keywords:
                     ordered_alt_keywords.append(kw)
         
         final_marp_alt_string = " ".join(ordered_alt_keywords).strip()
 
-        # Cropping is not supported with pure Markdown output.
-        # is_cropped = (element.crop_left_pct or ... )
-        # if is_cropped:
-        #    logger.warning("Image cropping is present but not supported for pure Markdown Marp output. Image will be uncropped.")
-
-        # Always output Marp Markdown image syntax
+        # Output the image using Marp's Markdown syntax.
         self.ofile.write(f'![{final_marp_alt_string}]({quoted_path})\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
@@ -853,9 +888,9 @@ img[alt~="right"] {
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_table(self, table):
-        gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />') for c in row]) + ' |'
+        gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />')  if not '`' in c else c.replace('\n', ' ') for c in row]) + ' |'
         self.ofile.write(gen_table_row(table[0]) + '\n')
-        self.ofile.write(gen_table_row([':-:' for _ in table[0]]) + '\n')
+        self.ofile.write(gen_table_row([':-' for _ in table[0]]) + '\n')
         self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
     def get_accent(self, text): # Italics
@@ -877,5 +912,5 @@ img[alt~="right"] {
     def get_escaped(self, text):
         # Basic Markdown escaping
         text = re.sub(self.esc_re1, self.esc_repl, text)
-        # text = re.sub(self.esc_re2, self.esc_repl, text) # Keep commented for Marp
+        text = re.sub(self.esc_re2, self.esc_repl, text)
         return text
