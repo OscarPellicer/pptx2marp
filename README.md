@@ -63,12 +63,10 @@ The default output filename is `out.md`, and any pictures extracted (and inserte
 
 __Note:__ older .ppt files are not supported, convert them to the new .pptx version first.
 
-__Upgrade & Remove:__
+__Remove:__
 
 ```sh
-pip install --upgrade pptx2md
-
-pip uninstall pptx2md
+pip uninstall pptx2marp
 ```
 
 ## Custom Titles
