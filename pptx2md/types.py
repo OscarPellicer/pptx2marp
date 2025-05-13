@@ -74,6 +74,9 @@ class ConversionConfig:
     is_marp: bool = False
     """Generate output as marp markdown"""
 
+    is_beamer: bool = False
+    """Generate output as beamer tex"""
+
     min_block_size: int = 15
     """The minimum character number of a text block to be converted"""
 

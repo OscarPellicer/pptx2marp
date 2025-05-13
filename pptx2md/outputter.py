@@ -16,6 +16,7 @@ import os
 import re
 import urllib.parse
 from typing import List, Tuple, Optional, Union
+import io
 
 from rapidfuzz import fuzz
 
@@ -29,6 +30,13 @@ class Formatter:
         os.makedirs(config.output_path.parent, exist_ok=True)
         self.ofile = open(config.output_path, 'w', encoding='utf8')
         self.config = config
+        # For BeamerFormatter and potentially others that buffer output
+        self._buffer = io.StringIO()
+        self.last_title_info: Optional[Tuple[str, int]] = None # Common for title similarity logic
+
+    def write(self, text: str):
+        # Default write to buffer. Formatters writing directly to file can override.
+        self._buffer.write(text)
 
     def _format_text_with_delimiters(self, text: str, open_delimiter: str, close_delimiter: str) -> str:
         if not text: # Handle empty string input early
@@ -69,76 +77,189 @@ class Formatter:
         
         return f"{leading_whitespace}{open_delimiter}{core_text}{close_delimiter}{trailing_whitespace}"
 
+    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int], int, int]:
+        """Calculates number of semantic lines, total characters, max image dimensions,
+           and specific text line/char counts for avg line length heuristic."""
+        line_count = 0
+        char_count = 0
+        max_image_width: Optional[int] = 0
+        max_image_height: Optional[int] = 0
+        
+        text_lines_for_avg_heuristic = 0
+        text_chars_for_avg_heuristic = 0
+
+        for element in elements_list:
+            element_text_content_for_avg = ""
+            is_text_for_avg_heuristic = False
+
+            if element.type == ElementType.Title:
+                line_count += 1
+                content = element.content.strip() if isinstance(element.content, str) else ""
+                char_count += len(content)
+            elif element.type == ElementType.ListItem:
+                line_count += 1
+                text_lines_for_avg_heuristic += 1
+                is_text_for_avg_heuristic = True
+                if isinstance(element.content, list): # List[TextRun]
+                    item_text = "".join(run.text for run in element.content)
+                    char_count += len(item_text)
+                    element_text_content_for_avg = item_text
+                elif isinstance(element.content, str): 
+                    char_count += len(element.content)
+                    element_text_content_for_avg = element.content
+
+            elif element.type == ElementType.Paragraph:
+                line_count += 1 
+                text_lines_for_avg_heuristic += 1
+                is_text_for_avg_heuristic = True
+                if isinstance(element.content, list): # List[TextRun]
+                    para_text = "".join(run.text for run in element.content)
+                    char_count += len(para_text)
+                    element_text_content_for_avg = para_text
+                elif isinstance(element.content, str): 
+                     char_count += len(element.content)
+                     element_text_content_for_avg = element.content
+            
+            elif element.type == ElementType.CodeBlock:
+                line_count += (element.content.count('\n') + 1) if element.content else 1
+                char_count += len(element.content)
+            
+            elif element.type == ElementType.Table:
+                if element.content: 
+                    line_count += len(element.content) 
+                    for row in element.content:
+                        for cell_runs in row: # Assuming cell is List[TextRun]
+                            if isinstance(cell_runs, list):
+                                for run in cell_runs:
+                                    char_count += len(run.text)
+                            elif isinstance(cell_runs, str): # Fallback if cell is string
+                                char_count += len(cell_runs)
+            
+            elif element.type == ElementType.Image:
+                if hasattr(element, 'display_width_px') and element.display_width_px is not None:
+                    max_image_width = max(max_image_width or 0, element.display_width_px)
+                if hasattr(element, 'display_height_px') and element.display_height_px is not None:
+                    max_image_height = max(max_image_height or 0, element.display_height_px)
+
+            if is_text_for_avg_heuristic:
+                text_chars_for_avg_heuristic += len(element_text_content_for_avg.strip())
+
+        return line_count, char_count, max_image_width, max_image_height, text_lines_for_avg_heuristic, text_chars_for_avg_heuristic
+
+    def _get_slide_density_class(self, line_count: int) -> Optional[str]:
+        """Determines a density class based on line count."""
+        if line_count > LINES_SMALLER_MAX: return "smallest"
+        if line_count > LINES_SMALL_MAX: return "smaller"
+        if line_count > LINES_NORMAL_MAX: return "small"
+        return None
+
     def output(self, presentation_data: ParsedPresentation):
         self.put_header()
 
-        last_element = None
-        last_title = None
+        last_element_type: Optional[ElementType] = None # Changed from last_element to track type
+        # self.last_title_info is already in __init__
+
         for slide_idx, slide in enumerate(presentation_data.slides):
             all_elements: List[SlideElement] = []
             if slide.type == SlideType.General:
                 all_elements = slide.elements
             elif slide.type == SlideType.MultiColumn:
-                all_elements = slide.preface + slide.columns
+                all_elements = slide.preface + [el for col in slide.columns for el in col]
+
 
             for element in all_elements:
-                if last_element and last_element.type == ElementType.ListItem and element.type != ElementType.ListItem:
+                if last_element_type and last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
                     self.put_list_footer()
+                
+                current_content_str = "" # Initialize for elements with text content
+                if element.type in [ElementType.Title, ElementType.Paragraph, ElementType.ListItem]:
+                    if isinstance(element.content, list) and all(isinstance(run, TextRun) for run in element.content):
+                        current_content_str = self.get_formatted_runs(element.content)
+                    elif isinstance(element.content, str):
+                        # For base formatter, escaping might be formatter-specific.
+                        # Let derived formatters handle escaping if text is string.
+                        # For now, pass raw string to put_para, put_title, put_list
+                        current_content_str = element.content 
+                    # else: content might be of unexpected type for these elements
 
                 match element.type:
                     case ElementType.Title:
-                        element.content = element.content.strip()
-                        if element.content:
-                            if last_title and last_title.level == element.level and fuzz.ratio(
-                                    last_title.content, element.content, score_cutoff=92):
-                                # skip if the title is the same as the last one
-                                # Allow for repeated slide titles - One or more - Add (cont.) to the title
+                        title_text = element.content.strip() if isinstance(element.content, str) else current_content_str.strip()
+                        if title_text:
+                            is_similar_to_last = False
+                            if self.last_title_info and self.last_title_info[1] == element.level and \
+                               fuzz.ratio(self.last_title_info[0], title_text, score_cutoff=92):
+                                is_similar_to_last = True
+                            
+                            if is_similar_to_last:
                                 if self.config.keep_similar_titles:
-                                    self.put_title(f'{element.content} (cont.)', element.level)
+                                    effective_title = f'{title_text} (cont.)'
+                                    self.put_title(effective_title, element.level)
+                                    self.last_title_info = (effective_title, element.level)
+                                # else skip
                             else:
-                                self.put_title(element.content, element.level)
-                            last_title = element
+                                self.put_title(title_text, element.level)
+                                self.last_title_info = (title_text, element.level)
                     case ElementType.ListItem:
-                        if not (last_element and last_element.type == ElementType.ListItem):
+                        if not (last_element_type and last_element_type == ElementType.ListItem):
                             self.put_list_header()
-                        self.put_list(self.get_formatted_runs(element.content), element.level)
+                        self.put_list(current_content_str, element.level)
                     case ElementType.Paragraph:
-                        self.put_para(self.get_formatted_runs(element.content))
+                        self.put_para(current_content_str)
                     case ElementType.Image:
-                        self.put_image(element.path, element.width)
+                        # Base Formatter might not know how to put_image.
+                        # This will be overridden by specific formatters.
+                        # Pass the whole element for rich data.
+                        if hasattr(self, 'put_image') and callable(self.put_image):
+                            self.put_image(element) 
                     case ElementType.Table:
-                        self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
+                        # Similar to image, specific formatters will implement.
+                        # Pass processed cell content.
+                        if hasattr(self, 'put_table') and callable(self.put_table):
+                            table_content = [[self.get_formatted_runs(cell) if isinstance(cell, list) else str(cell) for cell in row] for row in element.content]
+                            self.put_table(table_content)
                     case ElementType.CodeBlock:
-                        self.put_code_block(element.content, element.language)
+                        # Base Formatter might not know how to put_code_block.
+                        if hasattr(self, 'put_code_block') and callable(self.put_code_block):
+                            self.put_code_block(element.content, element.language)
                     case ElementType.Formula:
                         if isinstance(element, FormulaElement):
-                            self.put_formula(element)
-                last_element = element
+                            if hasattr(self, 'put_formula') and callable(self.put_formula):
+                                self.put_formula(element)
+                last_element_type = element.type
+
+            if last_element_type == ElementType.ListItem:
+                self.put_list_footer()
 
             if not self.config.disable_notes and slide.notes:
-                self.put_para('---')
-                for note in slide.notes:
-                    self.put_para(note)
+                # Notes handling can be generic if put_para is well-defined.
+                self.put_para('---') # Markdown-like separator for notes block
+                for note_line in slide.notes:
+                    # Notes are typically raw strings, may need escaping by formatter's put_para.
+                    self.put_para(note_line) 
 
             if slide_idx < len(presentation_data.slides) - 1 and self.config.enable_slides:
+                # Slide separator, also potentially formatter-specific.
+                # Defaulting to Markdown style.
                 self.put_para("\n---\n")
 
-        self.close()
+
+        self.close() # Ensure derived classes call super().close() if they override it for flushing buffer
 
     def put_header(self):
         pass
 
-    def put_title(self, text, level):
-        pass
-
-    def put_list(self, text, level):
-        pass
-
     def put_list_header(self):
-        self.put_para('')
+        """Placeholder for list header. Override in derived formatters."""
+        # For formatters like basic Markdown, this might involve an empty line for spacing.
+        # self.put_para('') # Example if spacing is needed.
+        pass
 
     def put_list_footer(self):
-        self.put_para('')
+        """Placeholder for list footer. Override in derived formatters."""
+        # For formatters like basic Markdown, this might involve an empty line for spacing.
+        # self.put_para('') # Example if spacing is needed.
+        pass
 
     def _styles_are_compatible(self, style1: Optional[TextStyle], style2: Optional[TextStyle]) -> bool:
         if style1 is None or style2 is None:
@@ -146,7 +267,7 @@ class Formatter:
         return (style1.is_code == style2.is_code and
                 style1.is_accent == style2.is_accent and
                 style1.is_strong == style2.is_strong and
-                style1.is_math == style2.is_math and # Added is_math
+                style1.is_math == style2.is_math and 
                 style1.hyperlink == style2.hyperlink and
                 style1.color_rgb == style2.color_rgb)
 
@@ -300,56 +421,61 @@ class Formatter:
                 leading_whitespace = text[:i]
                 core_text = text[i:]
                 break
-        else: # String is all whitespace
-            return text
-
-        # Find trailing whitespace (from current core_text)
+        else: return text
+        # Find trailing whitespace
         for i in range(len(core_text) - 1, -1, -1):
             if not core_text[i].isspace():
                 trailing_whitespace = core_text[i+1:]
                 core_text = core_text[:i+1]
                 break
-        
-        if not core_text: # Core became empty after stripping, e.g. "  "
-            return text # Return original whitespace
+        if not core_text: return text
 
-        # 2. Process the core_text for $ delimiters
-        # Check if core_text is already properly $...$ delimited
-        # A simple check: starts with $, ends with $, and is not just '$' or '$$' or starting with '$$'
-        already_single_delimited = (
-            len(core_text) > 1 and
-            core_text.startswith('$') and
-            core_text.endswith('$') and
-            not (core_text.startswith('$$') and core_text.endswith('$$')) # Avoid treating $$a$$ as $...$
-        )
 
-        if already_single_delimited:
-            # It's already $...$, use as is
+        # If core_text is already $...$ (but not $$...$$), use it.
+        # Otherwise, wrap with $.
+        if (core_text.startswith('$') and core_text.endswith('$') and
+            not (core_text.startswith('$$') and core_text.endswith('$$'))):
             final_math_part = core_text
         else:
-            # Not $...$ or malformed (e.g. $$...$$ which we treat as content for inline math)
-            # Wrap with single $
             final_math_part = f"${core_text}$"
             
         return f"{leading_whitespace}{final_math_part}{trailing_whitespace}"
 
+
     def get_colored(self, text, rgb):
-        pass
+        # Standard HTML for color, Marp should support it
+        return '<span style="color:%s">%s</span>' % (rgb_to_hex(rgb), text)
 
     def get_hyperlink(self, text, url):
-        pass
+        return '[' + text + '](' + url + ')'
 
     def get_escaped(self, text):
         pass
 
-    def write(self, text):
-        self.ofile.write(text)
-
     def flush(self):
-        self.ofile.flush()
+        # If writing directly to file, self.ofile.flush()
+        # If using self._buffer, this might not be needed until close(),
+        # or could write buffer to ofile and clear buffer.
+        if hasattr(self.ofile, 'flush'):
+             self.ofile.flush()
+
 
     def close(self):
-        self.ofile.close()
+        # Default implementation: write buffer to file, then close file.
+        # Formatters directly writing to self.ofile should override self.write()
+        # or ensure they don't use self._buffer.
+        # BeamerFormatter example correctly uses self._buffer and writes it here.
+        
+        # If _buffer was used (e.g. by BeamerFormatter's self.write())
+        buffered_content = self._buffer.getvalue()
+        if buffered_content:
+            # Perform any final sanitization on buffered_content if needed
+            # Example: sanitized_output = buffered_content.replace('\x0B', ' ')
+            # For now, assume content is fine or handled by specific formatter before writing to buffer
+            self.ofile.write(buffered_content)
+        
+        if self.ofile:
+            self.ofile.close()
 
 
 class MarkdownFormatter(Formatter):
@@ -412,33 +538,23 @@ class WikiFormatter(Formatter):
         self.esc_re = re.compile(r'<([^>]+)>')
 
     def put_title(self, text, level):
-        self.ofile.write('!' * level + ' ' + text + '\n\n')
+        self.write('!' * level + ' ' + text + '\n\n')
 
     def put_list(self, text, level):
-        self.ofile.write('*' * (level + 1) + ' ' + text.strip() + '\n')
+        self.write('*' * (level + 1) + ' ' + text.strip() + '\n')
 
     def put_para(self, text):
-        self.ofile.write(text + '\n\n')
+        self.write(text + '\n\n')
 
     def put_image(self, path, max_width):
         if max_width is None:
-            self.ofile.write(f'<img src="{path}" />\n\n')
+            self.write(f'<img src="{path}" />\n\n')
         else:
-            self.ofile.write(f'<img src="{path}" width={max_width}px />\n\n')
+            self.write(f'<img src="{path}" width={max_width}px />\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
-        # For TiddlyWiki, ```language ... ``` or <pre><code class="language-xxx">
-        lang_class = f' class="language-{language}"' if language else ""
-        # Ensure code content is not overly escaped if it contains HTML-like syntax itself.
-        # The content is raw string, so it's up to the formatter.
-        # For safety, let's HTML escape the code content itself if putting inside <pre><code>.
-        # However, standard markdown ``` doesn't typically HTML escape the content.
-        # Let's stick to ``` for wiki too, as many modern wikis support it.
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
-        # Alternative for more basic wikis:
-        # import html
-        # self.ofile.write(f'<pre><code{lang_class}>\n{html.escape(code.strip())}\n</code></pre>\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, "__", "__") # As it was before for italic emphasis
@@ -464,32 +580,32 @@ class MadokoFormatter(Formatter):
     # write outputs to madoko markdown
     def __init__(self, config: ConversionConfig):
         super().__init__(config)
-        self.ofile.write('[TOC]\n\n')
+        self.write('[TOC]\n\n') # Use self.write for TOC
         self.esc_re1 = re.compile(r'([\\\*`!_\{\}\[\]\(\)#\+-\.])')
         self.esc_re2 = re.compile(r'(<[^>]+>)')
 
     def put_title(self, text, level):
-        self.ofile.write('#' * level + ' ' + text + '\n\n')
+        self.write('#' * level + ' ' + text + '\n\n')
 
     def put_list(self, text, level):
-        self.ofile.write('  ' * level + '* ' + text.strip() + '\n')
+        self.write('  ' * level + '* ' + text.strip() + '\n')
 
     def put_para(self, text):
-        self.ofile.write(text + '\n\n')
+        self.write(text + '\n\n')
 
     def put_image(self, path, max_width):
         if max_width is None:
-            self.ofile.write(f'<img src="{path}" />\n\n')
+            self.write(f'<img src="{path}" />\n\n')
         elif max_width < 500:
-            self.ofile.write(f'<img src="{path}" width={max_width}px />\n\n')
+            self.write(f'<img src="{path}" width={max_width}px />\n\n')
         else:
-            self.ofile.write('~ Figure {caption: image caption}\n')
-            self.ofile.write('![](%s){width:%spx;}\n' % (path, max_width))
-            self.ofile.write('~\n\n')
+            self.write('~ Figure {caption: image caption}\n')
+            self.write('![](%s){width:%spx;}\n' % (path, max_width))
+            self.write('~\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, '_', '_')
@@ -520,39 +636,55 @@ class QuartoFormatter(Formatter):
         self.esc_re2 = re.compile(r'(<[^>]+>)')
 
     def output(self, presentation_data: ParsedPresentation):
-        self.put_header()
+        self.put_header() # Uses self.write -> buffer
 
-        last_title = None
+        last_title = None # Quarto specific title handling within its output
 
         def put_elements(elements: List[SlideElement]):
-            nonlocal last_title
+            nonlocal last_title # last_title is for Quarto's specific duplicate check here
 
-            last_element = None
+            last_element_type: Optional[ElementType] = None # Changed from last_element
             for element in elements:
-                if last_element and last_element.type == ElementType.ListItem and element.type != ElementType.ListItem:
-                    self.put_list_footer()
+                if last_element_type and last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
+                    self.put_list_footer() # Uses Quarto's put_list_footer if overridden, else base.
+
+                current_content_str = ""
+                if element.type in [ElementType.Title, ElementType.Paragraph, ElementType.ListItem]:
+                    if isinstance(element.content, list): current_content_str = self.get_formatted_runs(element.content)
+                    elif isinstance(element.content, str): current_content_str = self.get_escaped(element.content)
+
 
                 match element.type:
                     case ElementType.Title:
-                        element.content = element.content.strip()
-                        if element.content:
+                        title_text = current_content_str.strip() # Use already processed content
+                        if title_text:
+                            is_similar_to_last = False
+                            # Quarto's fuzz.ratio logic for titles
                             if last_title and last_title.level == element.level and fuzz.ratio(
-                                    last_title.content, element.content, score_cutoff=92):
-                                # skip if the title is the same as the last one
-                                # Allow for repeated slide titles - One or more - Add (cont.) to the title
+                                    last_title.content, title_text, score_cutoff=92): # title_text is now formatted
+                                is_similar_to_last = True
+                            
+                            if is_similar_to_last:
                                 if self.config.keep_similar_titles:
-                                    self.put_title(f'{element.content} (cont.)', element.level) 
+                                    self.put_title(f'{title_text} (cont.)', element.level) 
                             else:
-                                self.put_title(element.content, element.level)
-                            last_title = element
+                                self.put_title(title_text, element.level)
+                            # Update last_title for Quarto's specific tracking.
+                            # Need to decide if last_title stores raw or formatted string.
+                            # For fuzz.ratio, it might be better to compare raw content if possible,
+                            # or ensure comparison is consistent.
+                            # For simplicity here, we'll assume element.content holds the string for comparison.
+                            temp_last_title_obj = type('TempTitle', (), {'content': title_text, 'level': element.level})()
+                            last_title = temp_last_title_obj
+
                     case ElementType.ListItem:
-                        if not (last_element and last_element.type == ElementType.ListItem):
-                            self.put_list_header()
-                        self.put_list(self.get_formatted_runs(element.content), element.level)
+                        if not (last_element_type and last_element_type == ElementType.ListItem):
+                            self.put_list_header() # Uses Quarto's or base
+                        self.put_list(current_content_str, element.level)
                     case ElementType.Paragraph:
-                        self.put_para(self.get_formatted_runs(element.content))
+                        self.put_para(current_content_str)
                     case ElementType.Image:
-                        self.put_image(element.path, element.width)
+                        self.put_image(element.path, element.width) # Assuming element.width is max_width
                     case ElementType.Table:
                         self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
                     case ElementType.CodeBlock:
@@ -562,7 +694,11 @@ class QuartoFormatter(Formatter):
                     case ElementType.Formula:
                         if isinstance(element, FormulaElement):
                             self.put_formula(element)
-                last_element = element
+                last_element_type = element.type
+            
+            if last_element_type == ElementType.ListItem:
+                self.put_list_footer()
+
 
         for slide_idx, slide in enumerate(presentation_data.slides):
             if slide.type == SlideType.General:
@@ -573,29 +709,30 @@ class QuartoFormatter(Formatter):
                     width = '50%'
                 elif len(slide.columns) == 3:
                     width = '33%'
-                else:
-                    raise ValueError(f'Unsupported number of columns: {len(slide.columns)}')
+                else: # Should ideally not happen if parser validates
+                    width = f'{100/len(slide.columns):.0f}%' if slide.columns else '100%'
 
-                self.put_para(':::: {.columns}')
-                for column in slide.columns:
-                    self.put_para(f'::: {{.column width="{width}"}}')
-                    put_elements(column)
-                    self.put_para(':::')
-                self.put_para('::::')
+
+                self.put_para(':::: {.columns}') # Uses buffered write
+                for column_elements in slide.columns: # Iterate over List[SlideElement] which is a column
+                    self.put_para(f'::: {{.column width="{width}"}}') # Uses buffered write
+                    put_elements(column_elements) # Process elements within this column
+                    self.put_para(':::') # Uses buffered write
+                self.put_para('::::') # Uses buffered write
 
             if not self.config.disable_notes and slide.notes:
-                self.put_para("::: {.notes}")
+                self.put_para("::: {.notes}") # Uses buffered write
                 for note in slide.notes:
-                    self.put_para(note)
-                self.put_para(":::")
+                    self.put_para(note) # Assumes note is already a string, put_para will handle escaping via get_formatted_runs
+                self.put_para(":::") # Uses buffered write
 
             if slide_idx < len(presentation_data.slides) - 1 and self.config.enable_slides:
-                self.put_para("\n---\n")
+                self.put_para("\n---\n") # Uses buffered write
 
-        self.close()
+        self.close() # Calls base Formatter.close()
 
     def put_header(self):
-        self.ofile.write('''---
+        self.write('''---
 title: "Presentation Title"
 author: "Author"
 format: 
@@ -608,42 +745,50 @@ format:
     incremental: true
     theme: [simple]
 ---
-''')
+''') # Uses buffered write
 
     def put_title(self, text, level):
-        self.ofile.write('#' * level + ' ' + text + '\n\n')
+        self.write('#' * level + ' ' + text + '\n\n') # Uses buffered write
 
     def put_list(self, text, level):
-        self.ofile.write('  ' * level + '* ' + text.strip() + '\n')
+        self.write('  ' * level + '* ' + text.strip() + '\n') # Uses buffered write
 
     def put_para(self, text):
-        self.ofile.write(text + '\n\n')
+        self.write(text + '\n\n') # Uses buffered write
 
-    def put_image(self, path, max_width=None):
+    def put_image(self, path, max_width=None): # Signature matches MarkdownFormatter
+        # path here is element.path, max_width is element.width
+        # This is slightly different from other put_image that take the full element.
+        # For consistency, it might be better to make all put_image take ImageElement.
+        # For now, adapting to existing signature.
+        quoted_path = urllib.parse.quote(str(path)) # Ensure path is string
         if max_width is None:
-            self.ofile.write(f'![]({urllib.parse.quote(path)})\n\n')
+            self.write(f'![]({quoted_path})\n\n') # Uses buffered write
         else:
-            self.ofile.write(f'<img src="{path}" style="max-width:{max_width}px;" />\n\n')
+            self.write(f'<img src="{quoted_path}" style="max-width:{max_width}px;" />\n\n') # Uses buffered write
 
     def put_table(self, table):
         gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />') for c in row]) + ' |'
-        self.ofile.write(gen_table_row(table[0]) + '\n')
-        self.ofile.write(gen_table_row([':-:' for _ in table[0]]) + '\n')
-        self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
+        self.write(gen_table_row(table[0]) + '\n') # Uses buffered write
+        self.write(gen_table_row([':-:' for _ in table[0]]) + '\n') # Uses buffered write
+        self.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n') # Uses buffered write
 
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n') # Uses buffered write
 
-    def put_formula(self, element: FormulaElement):
+    def put_formula(self, element: FormulaElement): # Added for Quarto
+        # Quarto uses $...$ for inline and $$...$$ for display math, similar to Markdown.
+        # The _format_text_with_delimiters in base class handles $$...$$ for block formulas.
+        # FormulaElement content should be raw math.
         formatted_content = self._format_text_with_delimiters(element.content, "$$", "$$")
-        self.ofile.write(f'{formatted_content}\n\n')
+        self.write(f'{formatted_content}\n\n') # Uses buffered write
 
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, '_', '_')
 
     def get_strong(self, text):
-        return self._format_text_with_delimiters(text, '__', '__')
+        return self._format_text_with_delimiters(text, '**', '**')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -677,11 +822,13 @@ MARP_TARGET_HEIGHT_PX = 720
 class MarpFormatter(Formatter):
     # write outputs to marp markdown
     def __init__(self, config: ConversionConfig):
-        super().__init__(config)
+        super().__init__(config) # This now sets up self._buffer and self.last_title_info
         self.esc_re1 = re.compile(r'([\|\*`])')
         self.esc_re2 = re.compile(r'(<[^>]+>)')
-        self.last_title_info: Optional[Tuple[str, int]] = None
+        # self.last_title_info: Optional[Tuple[str, int]] = None # Moved to base
 
+    def write(self, text: str): # Override to write directly to file
+        self.ofile.write(text)
 
     def put_header(self):
         # CSS content, now to be embedded
@@ -856,7 +1003,7 @@ img[alt~="right"] {
   </div>
 -->"""
 
-        self.ofile.write(f'''---
+        self.write(f'''---
 marp: true
 theme: default 
 paginate: true
@@ -870,78 +1017,13 @@ html: true
 {examples_comment_html}
 
 ''')
-
-    def _get_slide_content_metrics(self, elements_list: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int], int, int]:
-        """Calculates number of semantic lines, total characters, max image dimensions,
-           and specific text line/char counts for avg line length heuristic."""
-        line_count = 0
-        char_count = 0
-        max_image_width: Optional[int] = 0
-        max_image_height: Optional[int] = 0
-        
-        text_lines_for_avg_heuristic = 0
-        text_chars_for_avg_heuristic = 0
-
-        for element in elements_list:
-            element_text_content_for_avg = ""
-            is_text_for_avg_heuristic = False
-
-            if element.type == ElementType.Title:
-                line_count += 1
-                content = element.content.strip() if isinstance(element.content, str) else ""
-                char_count += len(content)
-            elif element.type == ElementType.ListItem:
-                line_count += 1
-                text_lines_for_avg_heuristic += 1
-                is_text_for_avg_heuristic = True
-                if isinstance(element.content, list): # List[TextRun]
-                    item_text = "".join(run.text for run in element.content)
-                    char_count += len(item_text)
-                    element_text_content_for_avg = item_text
-                elif isinstance(element.content, str): 
-                    char_count += len(element.content)
-                    element_text_content_for_avg = element.content
-
-            elif element.type == ElementType.Paragraph:
-                line_count += 1 
-                text_lines_for_avg_heuristic += 1
-                is_text_for_avg_heuristic = True
-                if isinstance(element.content, list): # List[TextRun]
-                    para_text = "".join(run.text for run in element.content)
-                    char_count += len(para_text)
-                    element_text_content_for_avg = para_text
-                elif isinstance(element.content, str): 
-                     char_count += len(element.content)
-                     element_text_content_for_avg = element.content
-            
-            elif element.type == ElementType.CodeBlock:
-                line_count += (element.content.count('\n') + 1) if element.content else 1
-                char_count += len(element.content)
-            
-            elif element.type == ElementType.Table:
-                if element.content: 
-                    line_count += len(element.content) 
-                    for row in element.content:
-                        for cell_runs in row:
-                            for run in cell_runs:
-                                char_count += len(run.text)
-            
-            elif element.type == ElementType.Image:
-                if element.display_width_px is not None:
-                    max_image_width = max(max_image_width or 0, element.display_width_px)
-                if element.display_height_px is not None:
-                    max_image_height = max(max_image_height or 0, element.display_height_px)
-
-            if is_text_for_avg_heuristic:
-                text_chars_for_avg_heuristic += len(element_text_content_for_avg.strip())
-
-        return line_count, char_count, max_image_width, max_image_height, text_lines_for_avg_heuristic, text_chars_for_avg_heuristic
+        # self.write() used above calls MarpFormatter's direct file write.
 
     def _put_elements_on_slide(self, elements: List[SlideElement], is_continued_slide: bool = False):
-        """Helper to output a list of elements. `last_title_info` is now an instance var."""
+        """Helper to output a list of elements. `self.last_title_info` is from base class."""
         last_element_type: Optional[ElementType] = None
         for element_idx, element in enumerate(elements):
-            if last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
+            if last_element_type and last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
                 self.put_list_footer()
 
             # Special handling for the first title on a continued slide part
@@ -956,10 +1038,8 @@ html: true
             
             current_content_str = ""
             if element.type in [ElementType.Title, ElementType.Paragraph, ElementType.ListItem]:
-                if isinstance(element.content, str):
-                     current_content_str = element.content
-                elif isinstance(element.content, list): # TextRun
-                     current_content_str = self.get_formatted_runs(element.content)
+                if isinstance(element.content, list): current_content_str = self.get_formatted_runs(element.content)
+                elif isinstance(element.content, str): current_content_str = self.get_escaped(element.content)
 
 
             match element.type:
@@ -1008,7 +1088,7 @@ html: true
             self.put_list_footer()
 
     def output(self, presentation_data: ParsedPresentation):
-        self.put_header()
+        self.put_header() # Writes directly to file
         self.last_title_info = None # Reset for each presentation
 
         num_total_slides = len(presentation_data.slides)
@@ -1026,18 +1106,13 @@ html: true
 
             if not all_elements: 
                  if marp_slide_counter < num_total_slides : 
-                    self.ofile.write("\n---\n\n")
+                    self.write("\n---\n\n") # Writes directly to file
                  continue
 
-            line_count, char_count, max_img_w, max_img_h, text_lines_for_avg, text_chars_for_avg = self._get_slide_content_metrics(all_elements)
-
-            def get_slide_class(lc: int) -> Optional[str]:
-                if lc > LINES_SMALLER_MAX: return "smallest"
-                if lc > LINES_SMALL_MAX: return "smaller"
-                if lc > LINES_NORMAL_MAX: return "small"
-                return None
-
-            current_slide_class = get_slide_class(line_count)
+            # USE THE BASE CLASS METHODS
+            line_count, char_count, max_img_w, max_img_h, text_lines_for_avg, text_chars_for_avg = \
+                self._get_slide_content_metrics(all_elements)
+            current_slide_class = self._get_slide_density_class(line_count)
 
             # Determine if slide qualifies for splitting based on its overall content metrics
             initial_split_qualification = False
@@ -1078,7 +1153,7 @@ html: true
             
             # Output class directive (if any)
             if effective_slide_class:
-                self.ofile.write(f"<!-- _class: {effective_slide_class} -->\n\n")
+                self.write(f"<!-- _class: {effective_slide_class} -->\n\n") # Writes directly
 
             # Output the main title (if it was identified and separated)
             if main_title_element:
@@ -1091,11 +1166,11 @@ html: true
                 first_half_elements = content_for_columns[:num_in_first_col]
                 second_half_elements = content_for_columns[num_in_first_col:]
 
-                self.ofile.write('<div class="columns">\n<div>\n\n')
+                self.write('<div class="columns">\n<div>\n\n') # Writes directly
                 self._put_elements_on_slide(first_half_elements, is_continued_slide=False)
-                self.ofile.write('\n</div>\n<div>\n\n')
+                self.write('\n</div>\n<div>\n\n') # Writes directly
                 self._put_elements_on_slide(second_half_elements, is_continued_slide=False)
-                self.ofile.write('\n</div>\n</div>\n\n')
+                self.write('\n</div>\n</div>\n\n') # Writes directly
             else:
                 # Not splitting columns (either didn't qualify or not enough content after title).
                 # Output content_for_columns as a single block.
@@ -1105,26 +1180,31 @@ html: true
                     self._put_elements_on_slide(content_for_columns, is_continued_slide=False)
             
             if not self.config.disable_notes and slide.notes:
-                self.ofile.write("<!--\n")
+                self.write("<!--\n") # Writes directly
                 for note_line in slide.notes:
-                    self.ofile.write(f"{note_line}\n")
-                self.ofile.write("-->\n\n")
+                    self.write(f"{note_line}\n") # Writes directly
+                self.write("-->\n\n") # Writes directly
 
             # Add slide separator if not the very last conceptual slide
             is_last_original_slide = (slide_idx == num_total_slides - 1)
             if not (is_last_original_slide) : # Add --- if not the true end
-                 self.ofile.write("\n---\n\n")
+                 self.write("\n---\n\n") # Writes directly
 
-        self.close()
+        self.close() # MarpFormatter should have its own close or rely on base if it were using buffer
+
+    def close(self): # MarpFormatter specific close, as it writes directly
+        if self.ofile:
+            self.ofile.close()
+            self.ofile = None # type: ignore
 
     def put_title(self, text, level):
-        self.ofile.write('#' * level + ' ' + text + '\n\n')
+        self.write('#' * level + ' ' + text + '\n\n') # Writes directly
 
     def put_list(self, text, level):
-        self.ofile.write('  ' * level + '* ' + text.strip() + '\n')
+        self.write('  ' * level + '* ' + text.strip() + '\n') # Writes directly
 
     def put_para(self, text):
-        self.ofile.write(text + '\n\n')
+        self.write(text + '\n\n') # Writes directly
 
     def put_image(self, element: Union[ImageElement, FormulaElement]):
         alt = element.alt_text if element.alt_text else ""
@@ -1245,11 +1325,11 @@ html: true
         final_marp_alt_string = " ".join(ordered_alt_keywords).strip()
 
         # Output the image using Marp's Markdown syntax.
-        self.ofile.write(f'![{final_marp_alt_string}]({quoted_path})\n\n')
+        self.write(f'![{final_marp_alt_string}]({quoted_path})\n\n') # Writes directly
 
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n') # Writes directly
 
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, '*', '*')
@@ -1268,7 +1348,468 @@ html: true
         return '\\' + match.group(0)
 
     def get_escaped(self, text):
-        # Basic Markdown escaping
         text = re.sub(self.esc_re1, self.esc_repl, text)
         text = re.sub(self.esc_re2, self.esc_repl, text)
         return text
+
+class BeamerFormatter(Formatter):
+    # write outputs to LaTeX Beamer
+    def __init__(self, config: ConversionConfig):
+        super().__init__(config) # This now sets up self._buffer and self.last_title_info
+        # self._buffer is used by BeamerFormatter's self.write() (inherited from Formatter)
+        # LaTeX specific escaping. Order can be important.
+        self.esc_map = {
+            '\\': r'\textbackslash{}',
+            '{': r'\{',
+            '}': r'\}',
+            '&': r'\&',
+            '%': r'\%',
+            '$': r'\$',
+            '#': r'\#',
+            '_': r'\_',
+            '^': r'\textasciicircum{}',
+            '~': r'\textasciitilde{}',
+            '<': r'\textless{}',
+            '>': r'\textgreater{}',
+            '|': r'\textbar{}',
+            '"': r"''", # Using typographic quotes for `"`
+        }
+        self.esc_re = re.compile('|'.join(re.escape(key) for key in self.esc_map.keys()))
+        self.in_frame = False
+        # REMOVED: self._buffer = io.StringIO() # Base class handles this
+
+    def write(self, text: str): # Now uses inherited Formatter.write()
+        self._buffer.write(text)
+
+    def _put_elements_on_slide(self, elements: List[SlideElement]):
+        """Helper to output a list of elements within the current Beamer frame."""
+        last_element_type: Optional[ElementType] = None
+        for element in elements:
+            if last_element_type and last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
+                self.put_list_footer()
+
+            current_content_str = ""
+            if element.type in [ElementType.Title, ElementType.Paragraph, ElementType.ListItem]:
+                if isinstance(element.content, list) and all(isinstance(run, TextRun) for run in element.content):
+                    current_content_str = self.get_formatted_runs(element.content)
+                elif isinstance(element.content, str):
+                    # For Beamer, non-run string content should also be escaped.
+                    current_content_str = self.get_escaped(element.content)
+            
+            match element.type:
+                case ElementType.Title:
+                    # This is for titles *within* a frame, not the \frametitle
+                    # current_content_str already contains the formatted/escaped title
+                    if current_content_str.strip(): # Ensure there's content
+                        self.put_title(current_content_str.strip(), element.level)
+                case ElementType.ListItem:
+                    if not (last_element_type and last_element_type == ElementType.ListItem):
+                        self.put_list_header()
+                    self.put_list(current_content_str, element.level) # current_content_str is formatted/escaped
+                case ElementType.Paragraph:
+                    self.put_para(current_content_str) # current_content_str is formatted/escaped
+                case ElementType.Image:
+                    if isinstance(element, ImageElement):
+                        self.put_image(element) 
+                case ElementType.Table:
+                    if element.content: # Check if table has content
+                        # Table cell content needs to be formatted (runs to string, escaped)
+                        table_content_processed = []
+                        for row in element.content:
+                            processed_row = []
+                            for cell_runs_or_str in row:
+                                if isinstance(cell_runs_or_str, list): # List[TextRun]
+                                    processed_row.append(self.get_formatted_runs(cell_runs_or_str))
+                                elif isinstance(cell_runs_or_str, str):
+                                    processed_row.append(self.get_escaped(cell_runs_or_str))
+                                else:
+                                    processed_row.append('') # Should not happen with valid AST
+                            table_content_processed.append(processed_row)
+                        self.put_table(table_content_processed)
+                case ElementType.CodeBlock:
+                    # Content is raw code string, language is optional string
+                    self.put_code_block(element.content, element.language)
+                case ElementType.Formula:
+                    if isinstance(element, FormulaElement):
+                        self.put_formula(element) # put_formula handles its own escaping/formatting for LaTeX
+            
+            last_element_type = element.type
+        
+        if last_element_type == ElementType.ListItem: # Ensure list footer if elements end with list
+            self.put_list_footer()
+
+    def put_header(self):
+        # Default Beamer page size is 128mm x 96mm (4:3)
+        # For 16:9 aspect ratio (like 1280x720), use aspectratio=169
+        # Marp default: 1280x720px.
+        self.write(r'''\documentclass[aspectratio=169]{beamer}
+\usetheme{default} % Or any other theme
+
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx} % For images
+\usepackage{booktabs} % For tables (toprule, midrule, bottomrule)
+\usepackage{xcolor}   % For colors
+\usepackage{hyperref} % For hyperlinks
+\usepackage{amsmath}  % For math
+\usepackage{amssymb}  % For math symbols
+% \usepackage{listings} % For code blocks (optional, more advanced)
+% \usepackage{minted} % For code blocks (optional, powerful, needs shell-escape)
+
+% Beamer settings
+\beamertemplatenavigationsymbolsempty % Disable navigation symbols
+% \setbeamertemplate{footline}[frame number] % Optionally show frame number
+
+% \title{Presentation Title} % Removed: No automatic title page
+% \author{Author Name}     % Removed
+% \date{\today}            % Removed
+
+\begin{document}
+
+% \maketitle % Removed: No automatic title page
+
+''') # self.write() now uses inherited buffered write
+
+    def output(self, presentation_data: ParsedPresentation):
+        self.put_header()
+        self.last_title_info = None 
+
+        for slide_idx, slide in enumerate(presentation_data.slides):
+            slide_elements_for_processing: List[SlideElement] = []
+            is_multicolumn_slide_type = False
+            original_columns_data: Optional[List[List[SlideElement]]] = None
+
+            if slide.type == SlideType.General:
+                slide_elements_for_processing = slide.elements
+            elif slide.type == SlideType.MultiColumn:
+                is_multicolumn_slide_type = True
+                # For MultiColumn, preface is handled first, then columns.
+                # The decision to use Beamer columns will be based on content_for_columns.
+                slide_elements_for_processing = slide.preface # Process preface elements normally first
+                original_columns_data = slide.columns
+
+
+            if not slide_elements_for_processing and not (is_multicolumn_slide_type and original_columns_data):
+                if slide_idx < len(presentation_data.slides) - 1:
+                    self.write(r'\begin{frame}{}\end{frame}' + '\n\n')
+                continue
+
+
+            # Metrics for font scaling are based on ALL text elements on the slide initially
+            # This includes preface and what might go into columns.
+            initial_all_text_elements = slide.preface + [el for col in slide.columns for el in col] if is_multicolumn_slide_type else slide_elements_for_processing
+            line_count, _, _, _, text_lines_for_avg, text_chars_for_avg = \
+                self._get_slide_content_metrics(initial_all_text_elements)
+            density_class = self._get_slide_density_class(line_count)
+            
+            self.write(r'\begin{frame}')
+            current_font_scale_opened = False
+            if density_class == "small": 
+                self.write(r'{\small' + "\n")
+                current_font_scale_opened = True
+            elif density_class == "smaller": 
+                self.write(r'{\footnotesize' + "\n")
+                current_font_scale_opened = True
+            elif density_class == "smallest": 
+                self.write(r'{\scriptsize' + "\n")
+                current_font_scale_opened = True
+
+            self.in_frame = True
+            
+            # Handle Frame Title (from the first title in preface or general elements)
+            # This part processes elements that are *not* part of the explicit Beamer columns structure yet.
+            # If it's a MultiColumn slide, these are `slide.preface`.
+            # If it's General, these are `slide.elements` (which might later be split by our heuristic).
+            
+            main_title_element: Optional[SlideElement] = None
+            # Content elements that might be split into columns or processed as single block
+            content_after_title: List[SlideElement] = [] 
+
+            # Try to set frametitle from the first element of slide_elements_for_processing
+            if slide_elements_for_processing and slide_elements_for_processing[0].type == ElementType.Title:
+                main_title_element = slide_elements_for_processing[0]
+                # Elements after the identified main title become candidates for column splitting or single block
+                content_after_title = slide_elements_for_processing[1:]
+                
+                title_text_runs = main_title_element.content if isinstance(main_title_element.content, list) else None
+                title_text_str = main_title_element.content if isinstance(main_title_element.content, str) else None
+                formatted_title = ""
+                if title_text_runs: formatted_title = self.get_formatted_runs(title_text_runs)
+                elif title_text_str: formatted_title = self.get_escaped(title_text_str.strip())
+                
+                if formatted_title:
+                    self.write(f'{{\\frametitle{{{formatted_title}}}}}\n')
+                    self.last_title_info = (formatted_title, main_title_element.level)
+            else:
+                # No title found at the start of slide_elements_for_processing,
+                # so all of them are candidates for columns/single block.
+                content_after_title = slide_elements_for_processing
+
+
+            # --- Column Splitting Logic (heuristic, similar to Marp) ---
+            # This heuristic applies if the slide was NOT originally SlideType.MultiColumn,
+            # OR if it was, but we want to re-evaluate the `content_after_title` from preface.
+            # For now, let's simplify: if slide.type was MultiColumn, we use its structure.
+            # Otherwise, we apply the heuristic to `content_after_title`.
+
+            actually_split_columns_heuristic = False
+            if not is_multicolumn_slide_type and content_after_title: # Apply heuristic only to General slides
+                # Use metrics from content_after_title for column split decision
+                _, _, _, _, ca_text_lines, ca_text_chars = self._get_slide_content_metrics(content_after_title)
+                # The density_class for font size is already determined from the whole slide.
+                # This is just for column splitting decision.
+                current_content_density_class = self._get_slide_density_class(ca_text_lines)
+
+                initial_split_qualification = False
+                if current_content_density_class in ["smaller", "smallest"]: # or use line_count from content_after_title
+                    if ca_text_lines > 0:
+                        avg_line_length = ca_text_chars / ca_text_lines
+                        if avg_line_length < 40: # Marp's threshold
+                            initial_split_qualification = True
+                
+                contains_table_in_content = any(el.type == ElementType.Table for el in content_after_title)
+                
+                actually_split_columns_heuristic = initial_split_qualification and \
+                                         len(content_after_title) >= 2 and \
+                                         not contains_table_in_content
+
+            # --- Output content ---
+            if is_multicolumn_slide_type and original_columns_data:
+                # First, output any remaining preface elements that were not the frametitle
+                # If main_title_element was from preface, content_after_title contains rest of preface.
+                if main_title_element and slide_elements_for_processing == slide.preface:
+                     self._put_elements_on_slide(content_after_title) 
+                elif not main_title_element and slide.preface: # No title in preface, output all preface
+                     self._put_elements_on_slide(slide.preface)
+
+                # Then, output the Beamer columns from original_columns_data
+                num_cols = len(original_columns_data)
+                if num_cols > 0:
+                    self.write(r'\begin{columns}[T]' + '\n') # [T] for top alignment
+                    col_width = f'{1/num_cols:.2f}' # e.g., 0.50, 0.33
+                    for column_data_list in original_columns_data:
+                        self.write(r'  \column{' + col_width + r'\textwidth}' + '\n')
+                        self._put_elements_on_slide(column_data_list)
+                    self.write(r'\end{columns}' + '\n')
+
+            elif actually_split_columns_heuristic:
+                # Heuristically split content_after_title into two Beamer columns
+                num_in_first_col = (len(content_after_title) + 1) // 2
+                first_half_elements = content_after_title[:num_in_first_col]
+                second_half_elements = content_after_title[num_in_first_col:]
+
+                self.write(r'\begin{columns}[T]' + '\n')
+                self.write(r'  \column{0.48\textwidth}' + '\n') # Slight gap with 0.48+0.48
+                self._put_elements_on_slide(first_half_elements)
+                self.write(r'  \column{0.48\textwidth}' + '\n')
+                self._put_elements_on_slide(second_half_elements)
+                self.write(r'\end{columns}' + '\n')
+            else:
+                # Output content_after_title as a single block (no columns)
+                self._put_elements_on_slide(content_after_title)
+            
+            # Notes and end of frame
+            if not self.config.disable_notes and slide.notes:
+                self.write(r'\note{' + '\n'.join([self.get_escaped(note) for note in slide.notes]) + '}\n')
+
+            if current_font_scale_opened: 
+                self.write("\n}\n") 
+            
+            self.write(r'\end{frame}' + '\n\n')
+            self.in_frame = False
+
+        self.write(r'\end{document}' + '\n')
+        self.close()
+
+    def close(self):
+        raw_output = self._buffer.getvalue()
+        sanitized_output = raw_output.replace('\v', ' ') 
+        self.ofile.write(sanitized_output)
+        # Call super().close() from the original base Formatter if it did more than just closing ofile
+        # The new Formatter.close() handles buffer and ofile.
+        if self.ofile: # Ensure file is closed
+            self.ofile.close()
+            self.ofile = None # type: ignore
+
+
+    def put_title(self, text: str, level: int):
+        # For titles within a frame (e.g., if not the frametitle)
+        # text is already escaped and formatted by get_formatted_runs
+        if level == 1: # Beamer's \section* ? or \block?
+            self.write(r'\begin{block}{' + text + '}\n\\end{block}\n\n') 
+        elif level == 2: # \subsection*?
+            self.write(r'\textbf{' + text + '}\par\n\n') # Ensure paragraph break after
+        else:
+            self.write(r'\textit{' + text + '}\par\n\n') # Ensure paragraph break after
+
+
+    def put_list(self, text: str, level: int):
+        # text is already escaped and formatted by get_formatted_runs
+        # LaTeX handles nesting of itemize/enumerate automatically.
+        indent = '  ' * level 
+        self.write(indent + r'\item ' + text.strip() + '\n')
+
+    def put_para(self, text: str):
+        # text is already escaped and formatted by get_formatted_runs
+        self.write(text + '\n\n')
+
+    def put_image(self, element: Union[ImageElement, FormulaElement]):
+        alt = element.alt_text if element.alt_text else ""
+        quoted_path = urllib.parse.quote(element.path)
+        
+        options = []
+        # Convert pixel width to a fraction of \textwidth for responsiveness
+        # This is a very rough heuristic.
+        # config.slide_width_px should be available from entry.py
+        slide_width_px = self.config.slide_width_px or DEFAULT_SLIDE_WIDTH_PX # Fallback
+        
+        if element.display_width_px and slide_width_px > 0:
+            # Scale based on Marp's target width (1280px) as a reference for relative sizing
+            # This implies the image was intended to be X proportion of a 1280px wide slide.
+            # For Beamer, we use \textwidth for responsive width.
+            relative_width = element.display_width_px / MARP_TARGET_WIDTH_PX
+            relative_width = min(relative_width, 1.0) # Cap at 100% of textwidth
+            options.append(f'width={relative_width:.2f}\\textwidth')
+
+        # TODO: Add position hinting (centering, floating) using Beamer blocks or minipage
+        
+        options_str = ','.join(options)
+        # Centering images by default for now if they are block elements
+        self.write(r'\begin{center}' + '\n')
+        if options_str:
+            self.write(f'\\includegraphics[{options_str}]{{{quoted_path}}}\n')
+        else:
+            self.write(f'\\includegraphics{{{quoted_path}}}\n')
+        self.write(r'\end{center}' + '\n\n')
+        # TODO: Captions for figures using \captionof{figure} or similar if not in a figure env.
+
+
+    def put_code_block(self, code: str, language: Optional[str]):
+        # Corrected: Use verbatim for LaTeX
+        # language parameter is not directly used by basic verbatim.
+        # For listings/minted, it would be:
+        # lang_opt = f'[language={language}]' if language and self.config.use_listings else ''
+        # self.write(f'\\begin{{lstlisting}}{lang_opt}\n{self.get_escaped(code.strip(), verbatim_like=True)}\n\\end{{lstlisting}}\n\n')
+        
+        # Basic verbatim:
+        # Code inside verbatim should generally not be escaped by our esc_map,
+        # as verbatim handles most special characters itself.
+        # However, be careful with the \end{verbatim} string appearing in the code.
+        self.write(r'\begin{verbatim}' + '\n')
+        self.write(code.strip() + '\n') # Pass raw code to verbatim
+        self.write(r'\end{verbatim}' + '\n\n')
+
+    def put_formula(self, element: FormulaElement):
+        content = element.content.strip()
+        # Check if it's already delimited for display math, or should be
+        if content.startswith('$$') and content.endswith('$$'):
+            math_content = content[2:-2].strip()
+            self.write(f'\\[\n{math_content}\n\\]\n\n')
+        elif content.startswith('$') and content.endswith('$') and not content.startswith('$$'):
+             # Inline math, already formatted by get_formatted_runs potentially
+            self.write(f'{content}\n\n') # If it reached here as a block
+        else:
+            # Assume it's a block of math to be displayed
+            self.write(f'\\[\n{content}\n\\]\n\n')
+
+
+    def get_inline_code(self, text: str) -> str:
+        # For inline code, \texttt{} or a custom command with listings/minted
+        return r'\texttt{' + self.get_escaped(text, verbatim_like=True) + '}'
+
+    def get_accent(self, text):
+        return self._format_text_with_delimiters(text, r'\textit{', '}')
+
+    def get_strong(self, text):
+        return self._format_text_with_delimiters(text, r'\textbf{', '}')
+
+    def get_inline_math(self, text: str) -> str:
+        # Formatter's get_inline_math logic should handle $ delimiters correctly.
+        # Here, we just ensure the text passed to it is LaTeX-safe if it's not math.
+        # However, get_formatted_runs calls this with raw text for a math run.
+        
+        # This re-implementation is for LaTeX context
+        if not text:
+            return text
+
+        leading_whitespace = ""
+        trailing_whitespace = ""
+        core_text = text
+        # ... (whitespace stripping logic from base Formatter.get_inline_math) ...
+        # For brevity, assuming core_text is extracted:
+        # Find leading whitespace
+        for i, char_val in enumerate(text):
+            if not char_val.isspace():
+                leading_whitespace = text[:i]
+                core_text = text[i:]
+                break
+        else: return text
+        # Find trailing whitespace
+        for i in range(len(core_text) - 1, -1, -1):
+            if not core_text[i].isspace():
+                trailing_whitespace = core_text[i+1:]
+                core_text = core_text[:i+1]
+                break
+        if not core_text: return text
+
+
+        # If core_text is already $...$ (but not $$...$$), use it.
+        # Otherwise, wrap with $.
+        if (core_text.startswith('$') and core_text.endswith('$') and
+            not (core_text.startswith('$$') and core_text.endswith('$$'))):
+            final_math_part = core_text
+        else:
+            final_math_part = f"${core_text}$"
+            
+        return f"{leading_whitespace}{final_math_part}{trailing_whitespace}"
+
+
+    def get_colored(self, text, rgb):
+        # Convert RGB to 0-1 scale for xcolor if needed, or use rbg model
+        # xcolor \definecolor{mycolor}{RGB}{r,g,b} then \textcolor{mycolor}{text}
+        # Or directly: \textcolor[RGB]{r,g,b}{text}
+        r, g, b = rgb
+        # Text itself should be properly escaped if it contains special LaTeX characters
+        # The _format_single_merged_run method already handles escaping non-code/non-math text
+        # before calling get_colored. So 'text' here is assumed to be "final" form for its content.
+        return f'\\textcolor[RGB]{{{r},{g},{b}}}{{{text}}}'
+
+    def get_hyperlink(self, text, url):
+        # text is the display text, url is the target
+        # text is assumed to be already formatted/escaped by get_formatted_runs
+        escaped_url = self.get_escaped(url, is_url=True)
+        # The text part for \href typically doesn't need further escaping IF it's already processed.
+        # If text contains e.g. an already escaped underscore like \_ this is fine.
+        return r'\href{' + escaped_url + '}{' + text + '}'
+
+    def esc_repl(self, match, verbatim_like=False, is_url=False):
+        char = match.group(0)
+        if verbatim_like: # Inside \texttt{} or verbatim, less escaping is needed/different rules
+            if char == '{': return r'\{'
+            if char == '}': return r'\}'
+            if char == '\\': return r'\textbackslash{}'
+            # Other chars are usually fine in \texttt
+            return char
+        if is_url:
+            # URLs have specific characters that are problematic for TeX: %, #, &, _, ~
+            # hyperref usually handles many, but explicit escaping can be safer.
+            if char == '%': return r'\%'
+            if char == '#': return r'\#'
+            if char == '&': return r'\&'
+            if char == '_': return r'\_'
+            if char == '~': return r'\textasciitilde{}' # or let hyperref handle
+            # Other chars in URLs are typically fine.
+            return char
+        return self.esc_map.get(char, char)
+
+    def get_escaped(self, text, verbatim_like=False, is_url=False):
+        if self.config.disable_escaping:
+            return text
+        # When calling re.sub with a function, the function gets a match object
+        return self.esc_re.sub(lambda m: self.esc_repl(m, verbatim_like, is_url), text)
+
+    def put_list_header(self):
+        # Assuming simple itemize for now. Could be enumerate or more complex.
+        self.write(r'\begin{itemize}' + '\n')
+
+    def put_list_footer(self):
+        self.write(r'\end{itemize}' + '\n')

@@ -53,6 +53,8 @@ def convert(config: ConversionConfig):
         out = outputter.QuartoFormatter(config)
     elif config.is_marp:
         out = outputter.MarpFormatter(config)
+    elif hasattr(config, 'is_beamer') and config.is_beamer:
+        out = outputter.BeamerFormatter(config)
     else:
         out = outputter.MarkdownFormatter(config)
 

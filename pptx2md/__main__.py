@@ -46,6 +46,7 @@ def parse_args() -> ConversionConfig:
     arg_parser.add_argument('--mdk', action="store_true", help='generate output as madoko markdown')
     arg_parser.add_argument('--qmd', action="store_true", help='generate output as quarto markdown presentation')
     arg_parser.add_argument('--marp', action="store_true", help='generate output as marp markdown presentation')
+    arg_parser.add_argument('--beamer', action="store_true", help='generate output as LaTeX Beamer presentation')
     arg_parser.add_argument('--min-block-size',
                             type=int,
                             default=15,
@@ -70,6 +71,8 @@ def parse_args() -> ConversionConfig:
         extension = '.tid' if args.wiki else '.qmd' if args.qmd else '.md'
         if args.marp:
             extension = '.md'
+        if args.beamer:
+            extension = '.tex'
         args.output = Path(f'out{extension}')
 
     return ConversionConfig(
@@ -89,6 +92,7 @@ def parse_args() -> ConversionConfig:
         is_mdk=args.mdk,
         is_qmd=args.qmd,
         is_marp=args.marp,
+        is_beamer=args.beamer,
         min_block_size=args.min_block_size,
         page=args.page,
         keep_similar_titles=args.keep_similar_titles,

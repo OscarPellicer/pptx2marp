@@ -39,6 +39,7 @@ A tool to convert Powerpoint pptx file into markdown.
 * [Madoko](https://www.madoko.net/)
 * [Quarto](https://quarto.org/)
 * [Marp](https://marp.app/) (with automatic multi-column heuristics and CSS for manual figure captions)
+* LaTeX Beamer
 
 _Please star this repo if you like it!_
 
@@ -113,6 +114,11 @@ Use it with `pptx2md [filename] -t titles.txt`.
 * `--marp` outputs to the Marp markdown language for slide presentations.
   * **Automatic Two-Column Layout:** For slides classified as `smaller` or `smallest` (based on content length), if the average line length of list items and paragraphs is less than 40 characters, the content (excluding the main title, if any) will be automatically split into two columns. The slide's class will also be adjusted to `small`.
   * **Manual Figure Captions:** The generated Marp CSS includes styles for manually creating figures with captions. You can wrap an `<img>` tag and its caption (e.g., `<p class="figcaption">Your caption</p>` or `<em>Your caption</em>`) in a `<div class="figure-container">`. Add `align-left`, `align-right`, or `align-center` classes to the container for positioning. Examples are provided as comments in the generated CSS block of your `.md` file.
+* `--beamer` outputs a LaTeX Beamer (`.tex`) file.
+  * **Automatic Font Scaling:** Font size for the entire slide can be automatically adjusted (`small`, `footnotesize`, `scriptsize`) based on content density.
+  * **Automatic Two-Column Layout:** Similar to Marp, dense slides with short lines may be heuristically split into two Beamer columns.
+  * **LaTeX Features:** Uses `booktabs` for tables, `graphicx` for images (scaled relative to `\textwidth`), `verbatim` for code blocks, and standard LaTeX for mathematical formulas.
+  * **Beamer Configuration:** Generates a standard Beamer document with navigation symbols disabled and no automatic title page by default. The preamble includes common packages like `xcolor`, `hyperref`, `amsmath`, `amssymb`.
 * `--page [number]` only convert the specified page
 * `--keep-similar-titles` keep similar titles and add "(cont.)" to repeated slide titles
 
@@ -187,6 +193,7 @@ The `ConversionConfig` class accepts the same parameters as the command line arg
 - `mdk`: Output in Madoko format
 - `qmd`: Output in Quarto format
 - `marp`: Output in Marp format
+- `beamer`: Output in LaTeX Beamer format
 - `page`: Convert only specified page number
 - `keep_similar_titles`: Keep similar titles with "(cont.)" suffix
 
