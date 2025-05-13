@@ -15,11 +15,11 @@
 import os
 import re
 import urllib.parse
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 from rapidfuzz import fuzz
 
-from pptx2md.types import ConversionConfig, ElementType, ParsedPresentation, SlideElement, SlideType, TextRun, ImageElement
+from pptx2md.types import ConversionConfig, ElementType, ParsedPresentation, SlideElement, SlideType, TextRun, ImageElement, FormulaElement
 from pptx2md.utils import rgb_to_hex
 
 
@@ -36,7 +36,7 @@ class Formatter:
         last_element = None
         last_title = None
         for slide_idx, slide in enumerate(presentation_data.slides):
-            all_elements = []
+            all_elements: List[SlideElement] = []
             if slide.type == SlideType.General:
                 all_elements = slide.elements
             elif slide.type == SlideType.MultiColumn:
@@ -71,6 +71,9 @@ class Formatter:
                         self.put_table([[self.get_formatted_runs(cell) for cell in row] for row in element.content])
                     case ElementType.CodeBlock:
                         self.put_code_block(element.content, element.language)
+                    case ElementType.Formula:
+                        if isinstance(element, FormulaElement):
+                            self.put_formula(element)
                 last_element = element
 
             if not self.config.disable_notes and slide.notes:
@@ -148,6 +151,9 @@ class Formatter:
 
     def put_code_block(self, code: str, language: Optional[str]):
         pass
+
+    def put_formula(self, element: FormulaElement):
+        pass # Base implementation does nothing
 
     def get_inline_code(self, text: str) -> str:
         """Formats text as inline code. Does not strip or escape input text.
@@ -244,6 +250,9 @@ class MarkdownFormatter(Formatter):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
+    def put_formula(self, element: FormulaElement):
+        raise NotImplementedError("Formula elements are not yet supported in Markdown output.")
+
     def get_accent(self, text):
         return ' _' + text + '_ '
 
@@ -300,6 +309,9 @@ class WikiFormatter(Formatter):
         # import html
         # self.ofile.write(f'<pre><code{lang_class}>\n{html.escape(code.strip())}\n</code></pre>\n\n')
 
+    def put_formula(self, element: FormulaElement):
+        raise NotImplementedError("Formula elements are not yet supported in TiddlyWiki output.")
+
     def get_accent(self, text):
         return ' __' + text + '__ '
 
@@ -350,6 +362,9 @@ class MadokoFormatter(Formatter):
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+
+    def put_formula(self, element: FormulaElement):
+        raise NotImplementedError("Formula elements are not yet supported in Madoko output.")
 
     def get_accent(self, text):
         return ' _' + text + '_ '
@@ -419,6 +434,9 @@ class QuartoFormatter(Formatter):
                         code_content = getattr(element, 'content', '')
                         code_lang = getattr(element, 'language', None)
                         self.put_code_block(code_content, code_lang)
+                    case ElementType.Formula:
+                        if isinstance(element, FormulaElement):
+                            self.put_formula(element)
                 last_element = element
 
         for slide_idx, slide in enumerate(presentation_data.slides):
@@ -491,6 +509,9 @@ format:
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+
+    def put_formula(self, element: FormulaElement):
+        raise NotImplementedError("Formula elements are not yet supported in Marp output.")
 
     def get_accent(self, text):
         return ' _' + text + '_ '
@@ -752,7 +773,7 @@ img[alt~="right"] {
 
     def _put_elements_on_slide(self, elements: List[SlideElement], is_continued_slide: bool = False):
         """Helper to output a list of elements. `last_title_info` is now an instance var."""
-        last_element_type = None
+        last_element_type: Optional[ElementType] = None
         for element_idx, element in enumerate(elements):
             if last_element_type == ElementType.ListItem and element.type != ElementType.ListItem:
                 self.put_list_footer()
@@ -811,6 +832,9 @@ img[alt~="right"] {
                     code_content = getattr(element, 'content', '')
                     code_lang = getattr(element, 'language', None)
                     self.put_code_block(code_content, code_lang)
+                case ElementType.Formula:
+                    if isinstance(element, FormulaElement):
+                        self.put_formula(element)
             
             last_element_type = element.type
         
@@ -827,7 +851,7 @@ img[alt~="right"] {
         for slide_idx, slide in enumerate(presentation_data.slides):
             marp_slide_counter += 1
 
-            all_elements = []
+            all_elements: List[SlideElement] = []
             if slide.type == SlideType.General:
                 all_elements = slide.elements
             elif slide.type == SlideType.MultiColumn:
@@ -936,7 +960,7 @@ img[alt~="right"] {
     def put_para(self, text):
         self.ofile.write(text + '\n\n')
 
-    def put_image(self, element: ImageElement):
+    def put_image(self, element: Union[ImageElement, FormulaElement]):
         alt = element.alt_text if element.alt_text else ""
         quoted_path = urllib.parse.quote(element.path)
         
@@ -1060,6 +1084,9 @@ img[alt~="right"] {
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+
+    def put_formula(self, element: FormulaElement):
+        raise NotImplementedError("Formula elements are not yet supported in Marp output.")
 
     def put_table(self, table):
         gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />')  if not '`' in c else c.replace('\n', ' ') for c in row]) + ' |'

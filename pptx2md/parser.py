@@ -44,12 +44,23 @@ from pptx2md.types import (
     TextStyle,
     TitleElement,
     CodeBlockElement,
+    FormulaElement,
 )
 from pptx2md.utils import emu_to_px # Assuming emu_to_px is now in utils
 
 logger = logging.getLogger(__name__)
 
 picture_count = 0
+formula_count = 0 # Add counter for formula images
+
+# Known Program IDs for Equation Editors (can be expanded)
+EQUATION_PROG_IDS = [
+    "Equation.3",  # Microsoft Equation Editor 3.0
+    "MathType.Equation", # Design Science MathType
+    "MSGraph.Chart", # Sometimes equations are embedded as MSGraph objects that render as images
+    "Word.Document.8", # Embedded Word 97-2003 doc (could contain equation)
+    "Word.Document.12", # Embedded Word 2007+ doc (could contain equation)
+]
 
 
 def is_code_font(font) -> bool:
@@ -92,20 +103,23 @@ def is_list_block(shape) -> bool:
 
 
 def is_accent(font):
-    if font.underline or font.italic or (
+    return font and (
+        font.underline or font.italic or (
             font.color.type == MSO_COLOR_TYPE.SCHEME and
-        (font.color.theme_color == MSO_THEME_COLOR.ACCENT_1 or font.color.theme_color == MSO_THEME_COLOR.ACCENT_2 or
-         font.color.theme_color == MSO_THEME_COLOR.ACCENT_3 or font.color.theme_color == MSO_THEME_COLOR.ACCENT_4 or
-         font.color.theme_color == MSO_THEME_COLOR.ACCENT_5 or font.color.theme_color == MSO_THEME_COLOR.ACCENT_6)):
-        return True
-    return False
+        (font.color.theme_color == MSO_THEME_COLOR.ACCENT_1 or 
+         font.color.theme_color == MSO_THEME_COLOR.ACCENT_2 or
+         font.color.theme_color == MSO_THEME_COLOR.ACCENT_3 or 
+         font.color.theme_color == MSO_THEME_COLOR.ACCENT_4 or
+         font.color.theme_color == MSO_THEME_COLOR.ACCENT_5 or 
+         font.color.theme_color == MSO_THEME_COLOR.ACCENT_6))
+        )
 
 
 def is_strong(font):
-    if font.bold or (font.color.type == MSO_COLOR_TYPE.SCHEME and (font.color.theme_color == MSO_THEME_COLOR.DARK_1 or
-                                                                   font.color.theme_color == MSO_THEME_COLOR.DARK_2)):
-        return True
-    return False
+    return font and (font.bold or 
+                     (font.color.type == MSO_COLOR_TYPE.SCHEME and 
+                      (font.color.theme_color == MSO_THEME_COLOR.DARK_1 or 
+                       font.color.theme_color == MSO_THEME_COLOR.DARK_2)))
 
 
 def get_text_runs(para) -> List[TextRun]:
@@ -115,17 +129,17 @@ def get_text_runs(para) -> List[TextRun]:
         if result.text == '':
             continue
         try:
-            if run.hyperlink.address:
-                result.style.hyperlink = run.hyperlink.address
+            result.style.hyperlink = run.hyperlink.address
         except:
-            result.style.hyperlink = 'error:ppt-link-parsing-issue'
+            pass
+            #result.style.hyperlink = 'error:ppt-link-parsing-issue'
         if is_accent(run.font):
             result.style.is_accent = True
         if is_strong(run.font):
             result.style.is_strong = True
-        if run.font.color.type == MSO_COLOR_TYPE.RGB:
+        if run.font and (run.font.color.type == MSO_COLOR_TYPE.RGB):
             result.style.color_rgb = run.font.color.rgb
-        if is_code_font(run.font):
+        if run.font and is_code_font(run.font):
             result.style.is_code = True
         runs.append(result)
     return runs
@@ -156,7 +170,6 @@ def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Unio
     all_substantive_content_is_code = True
     has_any_substantive_content = False
 
-    temp_shape_runs_for_code_check: List[TextRun] = []
     for para in shape.text_frame.paragraphs:
         # We need to get runs with their styles to check .is_code
         para_runs = get_text_runs(para)
@@ -179,7 +192,6 @@ def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Unio
     # If there's no substantive content at all, it cannot be "all code" in a meaningful way.
     if not has_any_substantive_content:
         all_substantive_content_is_code = False
-
 
     if all_substantive_content_is_code:
         # This shape's substantive content is entirely code-styled.
@@ -206,7 +218,6 @@ def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Unio
             # To ensure an empty line, we can add:
             elif not para_runs and para.text.isspace(): # Whitespace only line
                 results.append(ParagraphElement(content=[TextRun(text=para.text, style=TextStyle(is_code=True))]))
-
 
     else:
         # Not an entirely code-styled shape. Fall back to list/paragraph detection.
@@ -489,7 +500,6 @@ def process_shapes(config: ConversionConfig, current_shapes, slide_id: int) -> L
             except:
                 pass
 
-    # if slide_id == 39: breakpoint()
     processed_elements: List[SlideElement] = []
     i = 0
     while i < len(initial_elements):

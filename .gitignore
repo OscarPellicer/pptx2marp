@@ -10,3 +10,4 @@ pptx2md/pptx2md.code-workspace
 /pptx2md/img
 *.qmd
 outputs/
+search.py

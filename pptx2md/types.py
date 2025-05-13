@@ -106,6 +106,7 @@ class ElementType(str, Enum):
     Image = "Image"
     Table = "Table"
     CodeBlock = "CodeBlock"
+    Formula = "Formula"
 
 class TextStyle(BaseModel):
     is_accent: bool = False
@@ -181,7 +182,29 @@ class CodeBlockElement(BaseElement):
     language: Optional[str] = None
 
 
-SlideElement = Union[TitleElement, ListItemElement, ParagraphElement, ImageElement, TableElement, CodeBlockElement]
+class FormulaElement(BaseElement):
+    type: ElementType = ElementType.Formula
+
+    # Primary content: LaTeX string if available
+    latex_content: Optional[str] = None
+    
+    # Fallback: Path to an image representation of the formula
+    image_path: Optional[str] = None
+    alt_text: Optional[str] = "formula" # Alt text for the image or description for LaTeX
+
+    # Hint for rendering (e.g., $latex$ for inline vs $$latex$$ for block)
+    is_inline: bool = False 
+
+    # Fields for layout if rendered as an image (especially for Marp compatibility)
+    display_width_px: Optional[int] = None    # From shape.width on slide
+    display_height_px: Optional[int] = None   # From shape.height on slide
+    original_width_px: Optional[int] = None   # Actual width of saved image blob (if applicable)
+    original_height_px: Optional[int] = None  # Actual height of saved image blob (if applicable)
+    left_px: Optional[int] = None             # From shape.left on slide
+    top_px: Optional[int] = None              # From shape.top on slide
+
+
+SlideElement = Union[TitleElement, ListItemElement, ParagraphElement, ImageElement, TableElement, CodeBlockElement, FormulaElement]
 
 
 class SlideType(str, Enum):

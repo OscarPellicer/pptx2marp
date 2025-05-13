@@ -40,8 +40,11 @@ _Please star this repo if you like it!_
 You need to have _[Python](https://www.python.org/)_ with version later than __3.10__ and _pip_ installed on your system, then run in the terminal:
 
 ```sh
-pip install pptx2md
+pip install -e git+https://github.com/OscarPellicer/pptx2marp.git
+pip install -e git+https://github.com/OscarPellicer/python-pptx.git
 ```
+
+Note: for now, we need to install a forked version of `python-pptx` because the original library doesn't support any shapes having equations. Same for `pptx2md`, since we have not yet submitted a PR to the original repo (and it's not clear if they will accept it, as we have made some opinionated changes).
 
 ### Usage
 
