@@ -12,6 +12,8 @@ This is a fork of the `pptx2md` project, primarily focused on converting PowerPo
 
 Right now the main functionality is working quite well, but there are some smaller problems left to be fixed, such as PowerPoint graphs not being converted to images.
 
+Note that this functionality has required a huge fork of the `python-pptx` library in order to support equation parsing and tiff image processing, which is not yet merged with the original repo. Please refer to the [python-pptx fork](https://github.com/OscarPellicer/python-pptx) for more details.
+
 # PPTX2MD
 
 [![Downloads](https://pepy.tech/badge/pptx2md)](https://pepy.tech/project/pptx2md)
