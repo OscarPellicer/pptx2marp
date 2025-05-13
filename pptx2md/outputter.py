@@ -682,10 +682,114 @@ class MarpFormatter(Formatter):
         self.esc_re2 = re.compile(r'(<[^>]+>)')
         self.last_title_info: Optional[Tuple[str, int]] = None
 
-        self.css_file_name = "marp-custom-styles.css"
-        css_path = config.output_path.parent / self.css_file_name
-        
-        examples_comment = """/* 
+
+    def put_header(self):
+        # CSS content, now to be embedded
+        css_content = """
+section.small {
+  font-size: 24px;
+}
+section.smaller {
+  font-size: 20px;
+}
+section.smallest {
+  font-size: 18px;
+}
+
+/* CSS for absolutely positioned elements */
+.abs-pos {
+  position: absolute;
+  /* Default width/height can be auto or set via style if needed by content */
+  /* Ensure z-index is used if overlap control is needed */
+}
+
+img[alt~="center"] {
+  display: block;
+  margin: 0 auto;
+}
+img[alt~="left"] {
+  float: left;
+  margin-right: 1em;
+  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-left */
+}
+img[alt~="right"] {
+  float: right;
+  margin-left: 1em;
+  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-right */
+}
+/* For Marp background images: ![bg right:30% 200%](image.jpg) */
+/* For Marp image sizing: ![alt text w:300px](image.png) */
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr); /* Creates two equal-width columns */
+  gap: 2em; /* Adjust the gap between columns as needed */
+}
+
+.columns > div {
+  /* Optional: You can add styling for individual columns here if needed */
+  /* For example, to ensure lists render correctly within columns */
+  overflow: hidden; /* Helps with list rendering inside flex/grid items */
+}
+
+/* Styles for images with captions (figure container) */
+.figure-container {
+  margin-bottom: 1em; /* Space below the figure block */
+  /* Consider clear: both; if flow issues arise after floated figures,
+     though Marp sections usually handle this. */
+}
+
+.figure-container img {
+  display: block; /* Image as a block element within its container */
+  max-width: 100%; /* Responsive: won't overflow container */
+  height: auto;
+  /* Center image if container is wider than image (e.g., for align-center) */
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.figure-container.align-left {
+  float: left;
+  margin-right: 1em; /* Spacing from content to its right */
+  margin-left: 0; /* Override auto margins for float */
+}
+.figure-container.align-left img {
+  margin-left: 0; /* Align image to the left of its container */
+  margin-right: auto; /* Allow centering if container is somehow wider */
+}
+
+.figure-container.align-right {
+  float: right;
+  margin-left: 1em; /* Spacing from content to its left */
+  margin-right: 0; /* Override auto margins for float */
+}
+.figure-container.align-right img {
+  margin-right: 0; /* Align image to the right of its container */
+  margin-left: auto; /* Allow centering if container is somehow wider */
+}
+
+.figure-container.align-center {
+  display: block; /* Container is block, centered by its own margins */
+  margin-left: auto;
+  margin-right: auto;
+  /* The img inside will be centered due to its own auto margins */
+}
+
+.figure-container .figcaption,
+.figure-container > em { /* Supports <p class="figcaption"> or direct <em> */
+  display: block; /* Ensures caption is block for consistent styling */
+  font-size: 0.85em;
+  color: #555; /* Muted color for caption text */
+  text-align: center; /* Captions are centered by default */
+  margin-top: 0.4em; /* Space between image and caption */
+  line-height: 1.3;
+  font-style: normal; /* Override em's italic if p.figcaption is used; em will be italic */
+}
+.figure-container > em {
+  font-style: italic; /* Ensure em tag remains italic */
+}
+"""
+        examples_comment_html = """<!-- 
   MANUAL LAYOUT USAGE EXAMPLES:
 
   Multi-column Layout:
@@ -750,134 +854,20 @@ class MarpFormatter(Formatter):
   <div class="abs-pos" style="left: 120px; top: 220px; width: 360px; color: white; font-size: 24px; text-align: center; z-index: 10;">
     Text overlaying the image.
   </div>
-*/
-"""
-        # Define the CSS content that was previously inline
-        # Adding @import 'default'; at the beginning.
-        css_content = f"""@import 'default';
+-->"""
 
-{examples_comment}
-
-section.small {{
-  font-size: 24px;
-}}
-section.smaller {{
-  font-size: 20px;
-}}
-section.smallest {{
-  font-size: 18px;
-}}
-
-/* CSS for absolutely positioned elements */
-.abs-pos {{
-  position: absolute;
-  /* Default width/height can be auto or set via style if needed by content */
-  /* Ensure z-index is used if overlap control is needed */
-}}
-
-img[alt~="center"] {{
-  display: block;
-  margin: 0 auto;
-}}
-img[alt~="left"] {{
-  float: left;
-  margin-right: 1em;
-  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-left */
-}}
-img[alt~="right"] {{
-  float: right;
-  margin-left: 1em;
-  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-right */
-}}
-/* For Marp background images: ![bg right:30% 200%](image.jpg) */
-/* For Marp image sizing: ![alt text w:300px](image.png) */
-
-.columns {{
-  display: grid;
-  grid-template-columns: repeat(2, 1fr); /* Creates two equal-width columns */
-  gap: 2em; /* Adjust the gap between columns as needed */
-}}
-
-.columns > div {{
-  /* Optional: You can add styling for individual columns here if needed */
-  /* For example, to ensure lists render correctly within columns */
-  overflow: hidden; /* Helps with list rendering inside flex/grid items */
-}}
-
-/* Styles for images with captions (figure container) */
-.figure-container {{
-  margin-bottom: 1em; /* Space below the figure block */
-  /* Consider clear: both; if flow issues arise after floated figures,
-     though Marp sections usually handle this. */
-}}
-
-.figure-container img {{
-  display: block; /* Image as a block element within its container */
-  max-width: 100%; /* Responsive: won't overflow container */
-  height: auto;
-  /* Center image if container is wider than image (e.g., for align-center) */
-  margin-left: auto;
-  margin-right: auto;
-}}
-
-.figure-container.align-left {{
-  float: left;
-  margin-right: 1em; /* Spacing from content to its right */
-  margin-left: 0; /* Override auto margins for float */
-}}
-.figure-container.align-left img {{
-  margin-left: 0; /* Align image to the left of its container */
-  margin-right: auto; /* Allow centering if container is somehow wider */
-}}
-
-.figure-container.align-right {{
-  float: right;
-  margin-left: 1em; /* Spacing from content to its left */
-  margin-right: 0; /* Override auto margins for float */
-}}
-.figure-container.align-right img {{
-  margin-right: 0; /* Align image to the right of its container */
-  margin-left: auto; /* Allow centering if container is somehow wider */
-}}
-
-.figure-container.align-center {{
-  display: block; /* Container is block, centered by its own margins */
-  margin-left: auto;
-  margin-right: auto;
-  /* The img inside will be centered due to its own auto margins */
-}}
-
-.figure-container .figcaption,
-.figure-container > em {{ /* Supports <p class="figcaption"> or direct <em> */
-  display: block; /* Ensures caption is block for consistent styling */
-  font-size: 0.85em;
-  color: #555; /* Muted color for caption text */
-  text-align: center; /* Captions are centered by default */
-  margin-top: 0.4em; /* Space between image and caption */
-  line-height: 1.3;
-  font-style: normal; /* Override em's italic if p.figcaption is used; em will be italic */
-}}
-.figure-container > em {{
-  font-style: italic; /* Ensure em tag remains italic */
-}}
-"""
-        # Ensure the parent directory exists (it should, due to base Formatter logic)
-        os.makedirs(css_path.parent, exist_ok=True)
-        with open(css_path, 'w', encoding='utf8') as f_css:
-            f_css.write(css_content.strip())
-
-
-    def put_header(self):
         self.ofile.write(f'''---
 marp: true
-theme: default
+theme: default 
 paginate: true
 html: true
 ---
 
 <style>
-  @import "./{self.css_file_name}";
+{css_content.strip()}
 </style>
+
+{examples_comment_html}
 
 ''')
 
