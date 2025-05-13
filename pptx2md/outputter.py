@@ -811,11 +811,12 @@ img[alt~="right"] {
   </div>
 
   Example (Text on top of an image):
-  <!-- First, the image (lower z-index or default) -->
+  First, the image (lower z-index or default)
   <div class="abs-pos" style="left: 100px; top: 200px; width: 400px; z-index: 5;">
     <img src="background_image.jpg" alt="Background" style="width: 100%; height: auto;">
   </div>
-  <!-- Then, the text (higher z-index) -->
+                         
+  Then, the text (higher z-index)
   <div class="abs-pos" style="left: 120px; top: 220px; width: 360px; color: white; font-size: 24px; text-align: center; z-index: 10;">
     Text overlaying the image.
   </div>

@@ -1,10 +1,16 @@
 # PPT2MARP
 
-This is a fork of the `pptx2md` project, with the ability to convert Powerpoint pptx files into Marp markdown. Right now the main functionality is working, but there are some smaller problems left to be fixed:
+This is a fork of the `pptx2md` project, primarily focused on converting PowerPoint pptx files into Marp markdown. Key enhancements and differences from the original `pptx2md` include:
 
-- There are too many images not being extracted: `Shape in slide 33 seems to be a picture but has no image data, skipped.`
-- The PowerPoint graphs are not being converted to images.
-- ~~Forumlas are not being converted to LaTeX. In fact, it seems that, when a formula is present, the whole text is not being converted to markdown~~ -> This has now been fixed by forking python-pptx and adding initial support for formula parsing.
+- **Marp Output:** Dedicated `--marp` output mode with specific features:
+    - Automatic multi-column layout heuristics for Marp slides.
+    - Included CSS for manual figure captions.
+    - Optimized image handling for Marp, including working size preservation.
+- **Mathematical Formula Parsing:** Conversion of PowerPoint equations into LaTeX, for display in Marp slides as `$...$` or `$$...$$`, depending on the context.
+- **Enhanced Code Formatting:** Improved detection and conversion for `inline code` and fenced code blocks (three backticks).
+- **Image Processing Refinements:** Includes fixes and improvements to image crop functionality and image conversion to PNG for unsupported image formats (e.g. wmf, tiff, etc.).
+
+Right now the main functionality is working quite well, but there are some smaller problems left to be fixed, such as PowerPoint graphs not being converted to images.
 
 # PPTX2MD
 
@@ -19,7 +25,8 @@ A tool to convert Powerpoint pptx file into markdown.
 * Text with **bold**, _italic_, color and [hyperlink](https://github.com/ssine/pptx2md/blob/master/README.md)
 * Pictures. They are extracted into image file, with crop settings from PowerPoint applied, and a relative path is inserted.
 * Tables with merged cells.
-* `Inline code` using monospaced fonts.
+* Mathematical formulas (parsed and converted to LaTeX).
+* `code` using monospaced fonts.
 * Code blocks, where text boxes primarily styled with monospaced fonts are converted.
 * Top-to-bottom then left-to-right block order.
 
@@ -44,7 +51,7 @@ pip install -e git+https://github.com/OscarPellicer/pptx2marp.git
 pip install -e git+https://github.com/OscarPellicer/python-pptx.git
 ```
 
-Note: for now, we need to install a forked version of `python-pptx` because the original library doesn't support any shapes having equations. Same for `pptx2md`, since we have not yet submitted a PR to the original repo (and it's not clear if they will accept it, as we have made some opinionated changes).
+Note: we need to install a forked version of `python-pptx` because the original library doesn't support equation parsing, and it fails to process tiff images. Same for `pptx2md`, since we have not yet submitted a PR to the original repo.
 
 ### Usage
 
@@ -219,8 +226,7 @@ code
 
 ### Formatting and Styling
 * Text formatting is preserved through markdown syntax:
-  * Bold text from PPT is converted to `**bold**`
-  * Italic text is converted to `_italic_`
+  * Bold text from PPT is converted to `**bold**`  * Italic text is converted to `_italic_`
   * Hyperlinks are preserved as `[text](url)`
   * Inline code is converted to `` `code` `` (see Code Handling section)
 * Color handling:
@@ -241,3 +247,4 @@ code
   * Complex formatting within cells is preserved
 * Special characters are escaped by default (can be disabled with `--disable-escaping`)
 * Presenter notes are included unless disabled with `--disable-notes`
+
