@@ -1,4 +1,4 @@
-# PPT2MARP
+# PPTX2MARP
 
 This is a fork of the `pptx2md` project, primarily focused on converting PowerPoint pptx files into Marp markdown. Key enhancements and differences from the original `pptx2md` include:
 
