@@ -30,7 +30,7 @@ class Formatter:
         self.ofile = open(config.output_path, 'w', encoding='utf8')
         self.config = config
 
-    def _format_with_preserved_whitespace(self, text: str, markup_char: str) -> str:
+    def _format_text_with_delimiters(self, text: str, open_delimiter: str, close_delimiter: str) -> str:
         if not text: # Handle empty string input early
             return text # Return original empty string
 
@@ -45,32 +45,29 @@ class Formatter:
         leading_whitespace = text[:leading_whitespace_count]
         text_without_leading = text[leading_whitespace_count:]
 
+        # Handle case where original text was only leading whitespace correctly
+        if not text_without_leading: 
+            return text 
+
         # 2. Find trailing whitespace (from text_without_leading)
         trailing_whitespace_count = 0
-        # If text_without_leading is empty (e.g. original text was just leading_whitespace), this loop won't run.
-        if not text_without_leading: # Should be caught if original text was all whitespace.
-             return text # Or reconstruct: leading_whitespace + "" + ""
-
         for char_idx, char_val in enumerate(reversed(text_without_leading)):
             if not char_val.isspace():
                 trailing_whitespace_count = char_idx
                 break
-        else: # text_without_leading is all whitespace (e.g. original was "  xxx  " and xxx became empty)
-              # This case should effectively mean core_text is empty.
-              # The initial `if not text:` and the all-whitespace check for `text` cover pure whitespace strings.
-              # If text_without_leading is all whitespace, then core_text will be empty.
-              pass
-
-
+        # No 'else' needed here. If text_without_leading is all whitespace, 
+        # trailing_whitespace_count will remain 0, and core_text will become empty.
+        
         core_text_end_index = len(text_without_leading) - trailing_whitespace_count
         core_text = text_without_leading[:core_text_end_index]
         trailing_whitespace = text_without_leading[core_text_end_index:]
 
         if not core_text: # If, after stripping both ends, core is empty
-                          # This implies the original text (after leading strip) was all whitespace.
-            return text # Return original text
+                          # This implies the original text (after leading strip) was all whitespace,
+                          # or the original text itself was effectively empty of non-whitespace.
+            return text # Return original text to avoid "open_delimiterclose_delimiter" for "   "
         
-        return f"{leading_whitespace}{markup_char}{core_text}{markup_char}{trailing_whitespace}"
+        return f"{leading_whitespace}{open_delimiter}{core_text}{close_delimiter}{trailing_whitespace}"
 
     def output(self, presentation_data: ParsedPresentation):
         self.put_header()
@@ -149,28 +146,33 @@ class Formatter:
         return (style1.is_code == style2.is_code and
                 style1.is_accent == style2.is_accent and
                 style1.is_strong == style2.is_strong and
-                # style1.is_math == style2.is_math and # Math is usually a distinct element type by this stage
+                style1.is_math == style2.is_math and # Added is_math
                 style1.hyperlink == style2.hyperlink and
                 style1.color_rgb == style2.color_rgb)
 
     def _format_single_merged_run(self, text: str, style: TextStyle) -> str:
-        if not text and not style.is_code: # Allow empty code runs for empty lines in code blocks
+        if not text and not style.is_code and not style.is_math: # Allow empty code/math runs potentially
             return ""
 
-        formatted_text = text
+        formatted_text = text # Start with raw text for this segment
 
         if style.is_code:
             # self.get_inline_code is responsible for its own handling of text
             return self.get_inline_code(formatted_text)
 
-        # Process non-code text
+        # For math, apply math formatting and return. Assume math is exclusive of other styling here.
+        if style.is_math:
+            # Escaping might not be needed or desired for math content itself.
+            # get_inline_math will handle delimiters and whitespace.
+            return self.get_inline_math(formatted_text)
+
+        # Process non-code, non-math text
         if not self.config.disable_escaping:
             formatted_text = self.get_escaped(formatted_text)
         
         # Apply strong and accent (bold and italic)
         # This order will result in accent (e.g., italics) being the inner markup
         # if both are applied, e.g., **_text_** or __*text*__
-        # which is a common convention.
         if style.is_strong:
             formatted_text = self.get_strong(formatted_text)
         if style.is_accent:
@@ -228,10 +230,12 @@ class Formatter:
         pass
 
     def put_code_block(self, code: str, language: Optional[str]):
-        pass
+        lang_tag = language if language else ""
+        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        pass # Base implementation does nothing
+        formatted_content = self._format_text_with_delimiters(element.content, "$$", "$$")
+        self.ofile.write(f'{formatted_content}\n\n')
 
     def get_inline_code(self, text: str) -> str:
         """Formats text as inline code. Does not strip or escape input text.
@@ -272,10 +276,62 @@ class Formatter:
         return f"{fence}{text}{fence}"
 
     def get_accent(self, text):
-        return self._format_with_preserved_whitespace(text, '_')
+        return self._format_text_with_delimiters(text, '_', '_')
 
     def get_strong(self, text):
-        return self._format_with_preserved_whitespace(text, '__')
+        return self._format_text_with_delimiters(text, '__', '__')
+
+    def get_inline_math(self, text: str) -> str:
+        """Formats text as inline math, preserving surrounding whitespace.
+           If text is already correctly $...$-delimited (but not $$...$$),
+           it ensures whitespace is external. Otherwise, wraps with $.
+        """
+        if not text:
+            return text
+
+        # 1. Extract leading and trailing whitespace
+        leading_whitespace = ""
+        trailing_whitespace = ""
+        core_text = text
+
+        # Find leading whitespace
+        for i, char_val in enumerate(text):
+            if not char_val.isspace():
+                leading_whitespace = text[:i]
+                core_text = text[i:]
+                break
+        else: # String is all whitespace
+            return text
+
+        # Find trailing whitespace (from current core_text)
+        for i in range(len(core_text) - 1, -1, -1):
+            if not core_text[i].isspace():
+                trailing_whitespace = core_text[i+1:]
+                core_text = core_text[:i+1]
+                break
+        
+        if not core_text: # Core became empty after stripping, e.g. "  "
+            return text # Return original whitespace
+
+        # 2. Process the core_text for $ delimiters
+        # Check if core_text is already properly $...$ delimited
+        # A simple check: starts with $, ends with $, and is not just '$' or '$$' or starting with '$$'
+        already_single_delimited = (
+            len(core_text) > 1 and
+            core_text.startswith('$') and
+            core_text.endswith('$') and
+            not (core_text.startswith('$$') and core_text.endswith('$$')) # Avoid treating $$a$$ as $...$
+        )
+
+        if already_single_delimited:
+            # It's already $...$, use as is
+            final_math_part = core_text
+        else:
+            # Not $...$ or malformed (e.g. $$...$$ which we treat as content for inline math)
+            # Wrap with single $
+            final_math_part = f"${core_text}$"
+            
+        return f"{leading_whitespace}{final_math_part}{trailing_whitespace}"
 
     def get_colored(self, text, rgb):
         pass
@@ -328,14 +384,11 @@ class MarkdownFormatter(Formatter):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
-    def put_formula(self, element: FormulaElement):
-        self.ofile.write(f'{element.content}\n\n')
-
     def get_accent(self, text):
-        return self._format_with_preserved_whitespace(text, '_')
+        return self._format_text_with_delimiters(text, '_', '_')
 
     def get_strong(self, text):
-        return self._format_with_preserved_whitespace(text, '__')
+        return self._format_text_with_delimiters(text, '__', '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -387,14 +440,11 @@ class WikiFormatter(Formatter):
         # import html
         # self.ofile.write(f'<pre><code{lang_class}>\n{html.escape(code.strip())}\n</code></pre>\n\n')
 
-    def put_formula(self, element: FormulaElement):
-        self.ofile.write(f'{element.content}\n\n')
-
     def get_accent(self, text):
-        return self._format_with_preserved_whitespace(text, '__')
+        return self._format_text_with_delimiters(text, "__", "__") # As it was before for italic emphasis
 
     def get_strong(self, text):
-        return self._format_with_preserved_whitespace(text, "''")
+        return self._format_text_with_delimiters(text, "''", "''") # As it was before for strong emphasis
 
     def get_colored(self, text, rgb):
         return ' @@color:%s; %s @@ ' % (rgb_to_hex(rgb), text)
@@ -441,14 +491,11 @@ class MadokoFormatter(Formatter):
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
-    def put_formula(self, element: FormulaElement):
-        self.ofile.write(f'$${element.content}$$\n\n')
-
     def get_accent(self, text):
-        return self._format_with_preserved_whitespace(text, '_')
+        return self._format_text_with_delimiters(text, '_', '_')
 
     def get_strong(self, text):
-        return self._format_with_preserved_whitespace(text, '__')
+        return self._format_text_with_delimiters(text, '__', '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -589,13 +636,14 @@ format:
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        self.ofile.write(f'$${element.content}$$\n\n')
+        formatted_content = self._format_text_with_delimiters(element.content, "$$", "$$")
+        self.ofile.write(f'{formatted_content}\n\n')
 
     def get_accent(self, text):
-        return self._format_with_preserved_whitespace(text, '_')
+        return self._format_text_with_delimiters(text, '_', '_')
 
     def get_strong(self, text):
-        return self._format_with_preserved_whitespace(text, '__')
+        return self._format_text_with_delimiters(text, '__', '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -632,130 +680,12 @@ class MarpFormatter(Formatter):
         super().__init__(config)
         self.esc_re1 = re.compile(r'([\|\*`])')
         self.esc_re2 = re.compile(r'(<[^>]+>)')
-        self.last_title_info: Optional[Tuple[str, int]] = None # For managing (cont.) and fuzzy match
+        self.last_title_info: Optional[Tuple[str, int]] = None
 
-    def put_header(self):
-        self.ofile.write('''---
-marp: true
-theme: default
-paginate: true
----
-
-<style>
-section.small {
-  font-size: 24px;
-}
-section.smaller {
-  font-size: 20px;
-}
-section.smallest {
-  font-size: 18px;
-}
-
-/* CSS for absolutely positioned elements */
-.abs-pos {
-  position: absolute;
-  /* Default width/height can be auto or set via style if needed by content */
-  /* Ensure z-index is used if overlap control is needed */
-}
-/* Example:
-   <div class="abs-pos" style="left: 100px; top: 50px; width: 200px; z-index: 10;">
-     <img src="path/to/image.png" alt="Abs Positioned Img" style="width: 100%; height: auto;" />
-   </div>
-   <div class="abs-pos" style="left: 150px; top: 80px; z-index: 11; color: white; background-color: rgba(0,0,0,0.5); padding: 5px;">
-     Absolutely Positioned Text
-   </div>
-*/
-
-img[alt~="center"] {
-  display: block;
-  margin: 0 auto;
-}
-img[alt~="left"] {
-  float: left;
-  margin-right: 1em;
-  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-left */
-}
-img[alt~="right"] {
-  float: right;
-  margin-left: 1em;
-  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-right */
-}
-/* For Marp background images: ![bg right:30% 200%](image.jpg) */
-/* For Marp image sizing: ![alt text w:300px](image.png) */
-
-.columns {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr); /* Creates two equal-width columns */
-  gap: 2em; /* Adjust the gap between columns as needed */
-}
-
-.columns > div {
-  /* Optional: You can add styling for individual columns here if needed */
-  /* For example, to ensure lists render correctly within columns */
-  overflow: hidden; /* Helps with list rendering inside flex/grid items */
-}
-
-/* Styles for images with captions (figure container) */
-.figure-container {
-  margin-bottom: 1em; /* Space below the figure block */
-  /* Consider clear: both; if flow issues arise after floated figures,
-     though Marp sections usually handle this. */
-}
-
-.figure-container img {
-  display: block; /* Image as a block element within its container */
-  max-width: 100%; /* Responsive: won't overflow container */
-  height: auto;
-  /* Center image if container is wider than image (e.g., for align-center) */
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.figure-container.align-left {
-  float: left;
-  margin-right: 1em; /* Spacing from content to its right */
-  margin-left: 0; /* Override auto margins for float */
-}
-.figure-container.align-left img {
-  margin-left: 0; /* Align image to the left of its container */
-  margin-right: auto; /* Allow centering if container is somehow wider */
-}
-
-.figure-container.align-right {
-  float: right;
-  margin-left: 1em; /* Spacing from content to its left */
-  margin-right: 0; /* Override auto margins for float */
-}
-.figure-container.align-right img {
-  margin-right: 0; /* Align image to the right of its container */
-  margin-left: auto; /* Allow centering if container is somehow wider */
-}
-
-.figure-container.align-center {
-  display: block; /* Container is block, centered by its own margins */
-  margin-left: auto;
-  margin-right: auto;
-  /* The img inside will be centered due to its own auto margins */
-}
-
-.figure-container .figcaption,
-.figure-container > em { /* Supports <p class="figcaption"> or direct <em> */
-  display: block; /* Ensures caption is block for consistent styling */
-  font-size: 0.85em;
-  color: #555; /* Muted color for caption text */
-  text-align: center; /* Captions are centered by default */
-  margin-top: 0.4em; /* Space between image and caption */
-  line-height: 1.3;
-  font-style: normal; /* Override em's italic if p.figcaption is used; em will be italic */
-}
-.figure-container > em {
-  font-style: italic; /* Ensure em tag remains italic */
-}
-
-</style>
-
-<!-- 
+        self.css_file_name = "marp-custom-styles.css"
+        css_path = config.output_path.parent / self.css_file_name
+        
+        examples_comment = """/* 
   MANUAL LAYOUT USAGE EXAMPLES:
 
   Multi-column Layout:
@@ -796,7 +726,7 @@ img[alt~="right"] {
   </div>
 
   Absolute Positioning:
-  Use a <div> with class "abs-pos" and inline styles for positioning.
+  Use a <div> with class="abs-pos" and inline styles for positioning.
   Coordinates are relative to the slide. (0,0) is top-left.
   Marp slide default is 1280x720px.
 
@@ -820,7 +750,134 @@ img[alt~="right"] {
   <div class="abs-pos" style="left: 120px; top: 220px; width: 360px; color: white; font-size: 24px; text-align: center; z-index: 10;">
     Text overlaying the image.
   </div>
--->
+*/
+"""
+        # Define the CSS content that was previously inline
+        # Adding @import 'default'; at the beginning.
+        css_content = f"""@import 'default';
+
+{examples_comment}
+
+section.small {{
+  font-size: 24px;
+}}
+section.smaller {{
+  font-size: 20px;
+}}
+section.smallest {{
+  font-size: 18px;
+}}
+
+/* CSS for absolutely positioned elements */
+.abs-pos {{
+  position: absolute;
+  /* Default width/height can be auto or set via style if needed by content */
+  /* Ensure z-index is used if overlap control is needed */
+}}
+
+img[alt~="center"] {{
+  display: block;
+  margin: 0 auto;
+}}
+img[alt~="left"] {{
+  float: left;
+  margin-right: 1em;
+  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-left */
+}}
+img[alt~="right"] {{
+  float: right;
+  margin-left: 1em;
+  margin-bottom: 0.5em; /* Optional: consistent with previous .img-float-right */
+}}
+/* For Marp background images: ![bg right:30% 200%](image.jpg) */
+/* For Marp image sizing: ![alt text w:300px](image.png) */
+
+.columns {{
+  display: grid;
+  grid-template-columns: repeat(2, 1fr); /* Creates two equal-width columns */
+  gap: 2em; /* Adjust the gap between columns as needed */
+}}
+
+.columns > div {{
+  /* Optional: You can add styling for individual columns here if needed */
+  /* For example, to ensure lists render correctly within columns */
+  overflow: hidden; /* Helps with list rendering inside flex/grid items */
+}}
+
+/* Styles for images with captions (figure container) */
+.figure-container {{
+  margin-bottom: 1em; /* Space below the figure block */
+  /* Consider clear: both; if flow issues arise after floated figures,
+     though Marp sections usually handle this. */
+}}
+
+.figure-container img {{
+  display: block; /* Image as a block element within its container */
+  max-width: 100%; /* Responsive: won't overflow container */
+  height: auto;
+  /* Center image if container is wider than image (e.g., for align-center) */
+  margin-left: auto;
+  margin-right: auto;
+}}
+
+.figure-container.align-left {{
+  float: left;
+  margin-right: 1em; /* Spacing from content to its right */
+  margin-left: 0; /* Override auto margins for float */
+}}
+.figure-container.align-left img {{
+  margin-left: 0; /* Align image to the left of its container */
+  margin-right: auto; /* Allow centering if container is somehow wider */
+}}
+
+.figure-container.align-right {{
+  float: right;
+  margin-left: 1em; /* Spacing from content to its left */
+  margin-right: 0; /* Override auto margins for float */
+}}
+.figure-container.align-right img {{
+  margin-right: 0; /* Align image to the right of its container */
+  margin-left: auto; /* Allow centering if container is somehow wider */
+}}
+
+.figure-container.align-center {{
+  display: block; /* Container is block, centered by its own margins */
+  margin-left: auto;
+  margin-right: auto;
+  /* The img inside will be centered due to its own auto margins */
+}}
+
+.figure-container .figcaption,
+.figure-container > em {{ /* Supports <p class="figcaption"> or direct <em> */
+  display: block; /* Ensures caption is block for consistent styling */
+  font-size: 0.85em;
+  color: #555; /* Muted color for caption text */
+  text-align: center; /* Captions are centered by default */
+  margin-top: 0.4em; /* Space between image and caption */
+  line-height: 1.3;
+  font-style: normal; /* Override em's italic if p.figcaption is used; em will be italic */
+}}
+.figure-container > em {{
+  font-style: italic; /* Ensure em tag remains italic */
+}}
+"""
+        # Ensure the parent directory exists (it should, due to base Formatter logic)
+        os.makedirs(css_path.parent, exist_ok=True)
+        with open(css_path, 'w', encoding='utf8') as f_css:
+            f_css.write(css_content.strip())
+
+
+    def put_header(self):
+        self.ofile.write(f'''---
+marp: true
+theme: default
+paginate: true
+html: true
+---
+
+<style>
+  @import "./{self.css_file_name}";
+</style>
 
 ''')
 
@@ -1204,20 +1261,11 @@ img[alt~="right"] {
         lang_tag = language if language else ""
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
-    def put_formula(self, element: FormulaElement):
-        self.ofile.write(f'$${element.content}$$\n\n')
+    def get_accent(self, text):
+        return self._format_text_with_delimiters(text, '*', '*')
 
-    def put_table(self, table):
-        gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />')  if not '`' in c else c.replace('\n', ' ') for c in row]) + ' |'
-        self.ofile.write(gen_table_row(table[0]) + '\n')
-        self.ofile.write(gen_table_row([':-' for _ in table[0]]) + '\n')
-        self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
-
-    def get_accent(self, text): # Italics
-        return self._format_with_preserved_whitespace(text, "*")
-
-    def get_strong(self, text): # Bold
-        return self._format_with_preserved_whitespace(text, "**")
+    def get_strong(self, text):
+        return self._format_text_with_delimiters(text, '**', '**')
 
     def get_colored(self, text, rgb):
         # Standard HTML for color, Marp should support it
