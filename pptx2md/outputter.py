@@ -652,6 +652,21 @@ section.smallest {
   font-size: 18px;
 }
 
+/* CSS for absolutely positioned elements */
+.abs-pos {
+  position: absolute;
+  /* Default width/height can be auto or set via style if needed by content */
+  /* Ensure z-index is used if overlap control is needed */
+}
+/* Example:
+   <div class="abs-pos" style="left: 100px; top: 50px; width: 200px; z-index: 10;">
+     <img src="path/to/image.png" alt="Abs Positioned Img" style="width: 100%; height: auto;" />
+   </div>
+   <div class="abs-pos" style="left: 150px; top: 80px; z-index: 11; color: white; background-color: rgba(0,0,0,0.5); padding: 5px;">
+     Absolutely Positioned Text
+   </div>
+*/
+
 img[alt~="center"] {
   display: block;
   margin: 0 auto;
@@ -778,6 +793,31 @@ img[alt~="right"] {
   <div class="figure-container align-center" style="max-width: 500px;"> 
     <img src="path/to/your/image.png" alt="Alt text">
     <em>A simple italic caption.</em>
+  </div>
+
+  Absolute Positioning:
+  Use a <div> with class "abs-pos" and inline styles for positioning.
+  Coordinates are relative to the slide. (0,0) is top-left.
+  Marp slide default is 1280x720px.
+
+  Example (Image):
+  <div class="abs-pos" style="left: 50px; top: 100px; width: 300px; height: 200px; z-index: 1;">
+    <img src="image.png" alt="My absolutely positioned image" style="width: 100%; height: 100%; object-fit: cover;">
+  </div>
+
+  Example (Text):
+  <div class="abs-pos" style="left: 400px; top: 150px; width: 250px; padding: 10px; background-color: lightblue; z-index: 2;">
+    This is some text placed absolutely.
+  </div>
+
+  Example (Text on top of an image):
+  <!-- First, the image (lower z-index or default) -->
+  <div class="abs-pos" style="left: 100px; top: 200px; width: 400px; z-index: 5;">
+    <img src="background_image.jpg" alt="Background" style="width: 100%; height: auto;">
+  </div>
+  <!-- Then, the text (higher z-index) -->
+  <div class="abs-pos" style="left: 120px; top: 220px; width: 360px; color: white; font-size: 24px; text-align: center; z-index: 10;">
+    Text overlaying the image.
   </div>
 -->
 
