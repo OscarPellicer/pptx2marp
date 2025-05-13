@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Union, Any, Tuple
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel
@@ -114,6 +114,7 @@ class TextStyle(BaseModel):
     color_rgb: Optional[tuple[int, int, int]] = None
     hyperlink: Optional[str] = None
     is_code: bool = False
+    is_math: bool = False
 
 
 class TextRun(BaseModel):
@@ -178,33 +179,20 @@ class TableElement(BaseElement):
 
 class CodeBlockElement(BaseElement):
     type: ElementType = ElementType.CodeBlock
-    content: str 
+    content: str
     language: Optional[str] = None
+    position: Optional[Tuple[float, float]] = None
 
 
 class FormulaElement(BaseElement):
     type: ElementType = ElementType.Formula
-
-    # Primary content: LaTeX string if available
-    latex_content: Optional[str] = None
-    
-    # Fallback: Path to an image representation of the formula
-    image_path: Optional[str] = None
-    alt_text: Optional[str] = "formula" # Alt text for the image or description for LaTeX
-
-    # Hint for rendering (e.g., $latex$ for inline vs $$latex$$ for block)
-    is_inline: bool = False 
-
-    # Fields for layout if rendered as an image (especially for Marp compatibility)
-    display_width_px: Optional[int] = None    # From shape.width on slide
-    display_height_px: Optional[int] = None   # From shape.height on slide
-    original_width_px: Optional[int] = None   # Actual width of saved image blob (if applicable)
-    original_height_px: Optional[int] = None  # Actual height of saved image blob (if applicable)
-    left_px: Optional[int] = None             # From shape.left on slide
-    top_px: Optional[int] = None              # From shape.top on slide
+    content: str
+    position: Optional[Tuple[float, float]] = None
 
 
-SlideElement = Union[TitleElement, ListItemElement, ParagraphElement, ImageElement, TableElement, CodeBlockElement, FormulaElement]
+SlideElement = Union[
+    TitleElement, ParagraphElement, ListItemElement, ImageElement, TableElement, CodeBlockElement, FormulaElement
+]
 
 
 class SlideType(str, Enum):

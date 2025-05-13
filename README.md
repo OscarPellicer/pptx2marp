@@ -4,7 +4,7 @@ This is a fork of the `pptx2md` project, with the ability to convert Powerpoint 
 
 - There are too many images not being extracted: `Shape in slide 33 seems to be a picture but has no image data, skipped.`
 - The PowerPoint graphs are not being converted to images.
-- Forumlas are not being converted to LaTeX. In fact, it seems that, when a formula is present, the whole text is not being converted to markdown.
+- ~~Forumlas are not being converted to LaTeX. In fact, it seems that, when a formula is present, the whole text is not being converted to markdown~~ -> This has now been fixed by forking python-pptx and adding initial support for formula parsing.
 
 # PPTX2MD
 

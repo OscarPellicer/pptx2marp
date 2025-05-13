@@ -19,7 +19,7 @@ from typing import List, Tuple, Optional, Union
 
 from rapidfuzz import fuzz
 
-from pptx2md.types import ConversionConfig, ElementType, ParsedPresentation, SlideElement, SlideType, TextRun, ImageElement, FormulaElement
+from pptx2md.types import ConversionConfig, ElementType, ParsedPresentation, SlideElement, SlideType, TextRun, ImageElement, FormulaElement, TextStyle
 from pptx2md.utils import rgb_to_hex
 
 
@@ -29,6 +29,48 @@ class Formatter:
         os.makedirs(config.output_path.parent, exist_ok=True)
         self.ofile = open(config.output_path, 'w', encoding='utf8')
         self.config = config
+
+    def _format_with_preserved_whitespace(self, text: str, markup_char: str) -> str:
+        if not text: # Handle empty string input early
+            return text # Return original empty string
+
+        # 1. Find leading whitespace
+        leading_whitespace_count = 0
+        for char_idx, char_val in enumerate(text):
+            if not char_val.isspace():
+                leading_whitespace_count = char_idx
+                break
+        else: # String is all whitespace
+            return text
+        leading_whitespace = text[:leading_whitespace_count]
+        text_without_leading = text[leading_whitespace_count:]
+
+        # 2. Find trailing whitespace (from text_without_leading)
+        trailing_whitespace_count = 0
+        # If text_without_leading is empty (e.g. original text was just leading_whitespace), this loop won't run.
+        if not text_without_leading: # Should be caught if original text was all whitespace.
+             return text # Or reconstruct: leading_whitespace + "" + ""
+
+        for char_idx, char_val in enumerate(reversed(text_without_leading)):
+            if not char_val.isspace():
+                trailing_whitespace_count = char_idx
+                break
+        else: # text_without_leading is all whitespace (e.g. original was "  xxx  " and xxx became empty)
+              # This case should effectively mean core_text is empty.
+              # The initial `if not text:` and the all-whitespace check for `text` cover pure whitespace strings.
+              # If text_without_leading is all whitespace, then core_text will be empty.
+              pass
+
+
+        core_text_end_index = len(text_without_leading) - trailing_whitespace_count
+        core_text = text_without_leading[:core_text_end_index]
+        trailing_whitespace = text_without_leading[core_text_end_index:]
+
+        if not core_text: # If, after stripping both ends, core is empty
+                          # This implies the original text (after leading strip) was all whitespace.
+            return text # Return original text
+        
+        return f"{leading_whitespace}{markup_char}{core_text}{markup_char}{trailing_whitespace}"
 
     def output(self, presentation_data: ParsedPresentation):
         self.put_header()
@@ -101,44 +143,80 @@ class Formatter:
     def put_list_footer(self):
         self.put_para('')
 
-    def get_formatted_runs(self, runs: List[TextRun]):
-        res_parts = []
-        for run in runs:
-            text = run.text
-            # Do not skip empty runs here. The final .strip() handles overall whitespace.
+    def _styles_are_compatible(self, style1: Optional[TextStyle], style2: Optional[TextStyle]) -> bool:
+        if style1 is None or style2 is None:
+            return False # Should not happen with proper initialization
+        return (style1.is_code == style2.is_code and
+                style1.is_accent == style2.is_accent and
+                style1.is_strong == style2.is_strong and
+                # style1.is_math == style2.is_math and # Math is usually a distinct element type by this stage
+                style1.hyperlink == style2.hyperlink and
+                style1.color_rgb == style2.color_rgb)
 
-            if run.style.is_code:
-                # Pass the raw run text to get_inline_code.
-                # It should not do its own stripping or escaping.
-                formatted_text = self.get_inline_code(text)
-            else:
-                formatted_text = text # Start with raw text for non-code runs
-                if not self.config.disable_escaping:
-                    # Perform escaping only on non-code text.
-                    formatted_text = self.get_escaped(formatted_text)
+    def _format_single_merged_run(self, text: str, style: TextStyle) -> str:
+        if not text and not style.is_code: # Allow empty code runs for empty lines in code blocks
+            return ""
 
-                # Styling applied sequentially. Order might matter depending on desired outcome.
-                if run.style.hyperlink:
-                    formatted_text = self.get_hyperlink(formatted_text, run.style.hyperlink)
-                if run.style.is_accent:
-                    formatted_text = self.get_accent(formatted_text)
-                elif run.style.is_strong: 
-                    formatted_text = self.get_strong(formatted_text)
-                if run.style.color_rgb and not self.config.disable_color:
-                    formatted_text = self.get_colored(formatted_text, run.style.color_rgb)
+        formatted_text = text
+
+        if style.is_code:
+            # self.get_inline_code is responsible for its own handling of text
+            return self.get_inline_code(formatted_text)
+
+        # Process non-code text
+        if not self.config.disable_escaping:
+            formatted_text = self.get_escaped(formatted_text)
+        
+        # Apply strong and accent (bold and italic)
+        # This order will result in accent (e.g., italics) being the inner markup
+        # if both are applied, e.g., **_text_** or __*text*__
+        # which is a common convention.
+        if style.is_strong:
+            formatted_text = self.get_strong(formatted_text)
+        if style.is_accent:
+            formatted_text = self.get_accent(formatted_text)
+        
+        if style.color_rgb and not self.config.disable_color:
+            formatted_text = self.get_colored(formatted_text, style.color_rgb)
+        
+        if style.hyperlink:
+            formatted_text = self.get_hyperlink(formatted_text, style.hyperlink)
             
-            res_parts.append(formatted_text)
-        
-        # Strip only at the very end of processing all runs for an element.
-        all_text = "".join(res_parts).strip()
-        
-        # TODO: Do this better. Delete quadruple asterisks "****"
-        all_text = all_text.replace('****', '')
+        return formatted_text
 
-        # TODO: Do this better. Delete repeated backticks "``"
-        all_text = all_text.replace('``', '')
+    def get_formatted_runs(self, runs: List[TextRun]):
+        if not runs:
+            return ""
 
-        return all_text
+        output_segments: List[str] = []
+        
+        # Initialize with the first run
+        current_merged_text = runs[0].text
+        current_style = runs[0].style
+
+        for i in range(1, len(runs)):
+            next_run = runs[i]
+            if self._styles_are_compatible(current_style, next_run.style):
+                # Styles are compatible, merge text
+                current_merged_text += next_run.text
+            else:
+                # Styles differ, format the accumulated text and add to segments
+                # Process if text exists or if it's an intentionally empty code run
+                if current_merged_text or (current_style and current_style.is_code):
+                     output_segments.append(self._format_single_merged_run(current_merged_text, current_style))
+                
+                # Start a new merged run
+                current_merged_text = next_run.text
+                current_style = next_run.style
+            
+        # Format the last accumulated run
+        if current_merged_text or (current_style and current_style.is_code):
+            output_segments.append(self._format_single_merged_run(current_merged_text, current_style))
+            
+        final_text = "".join(output_segments)
+        
+        # The .strip() at the end of the original get_formatted_runs was on the final joined string.
+        return final_text.strip()
 
     def put_para(self, text):
         pass
@@ -194,10 +272,10 @@ class Formatter:
         return f"{fence}{text}{fence}"
 
     def get_accent(self, text):
-        pass
+        return self._format_with_preserved_whitespace(text, '_')
 
     def get_strong(self, text):
-        pass
+        return self._format_with_preserved_whitespace(text, '__')
 
     def get_colored(self, text, rgb):
         pass
@@ -251,13 +329,13 @@ class MarkdownFormatter(Formatter):
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        raise NotImplementedError("Formula elements are not yet supported in Markdown output.")
+        self.ofile.write(f'{element.content}\n\n')
 
     def get_accent(self, text):
-        return ' _' + text + '_ '
+        return self._format_with_preserved_whitespace(text, '_')
 
     def get_strong(self, text):
-        return ' __' + text + '__ '
+        return self._format_with_preserved_whitespace(text, '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -310,13 +388,13 @@ class WikiFormatter(Formatter):
         # self.ofile.write(f'<pre><code{lang_class}>\n{html.escape(code.strip())}\n</code></pre>\n\n')
 
     def put_formula(self, element: FormulaElement):
-        raise NotImplementedError("Formula elements are not yet supported in TiddlyWiki output.")
+        self.ofile.write(f'{element.content}\n\n')
 
     def get_accent(self, text):
-        return ' __' + text + '__ '
+        return self._format_with_preserved_whitespace(text, '__')
 
     def get_strong(self, text):
-        return ' \'\'' + text + '\'\' '
+        return self._format_with_preserved_whitespace(text, "''")
 
     def get_colored(self, text, rgb):
         return ' @@color:%s; %s @@ ' % (rgb_to_hex(rgb), text)
@@ -364,13 +442,13 @@ class MadokoFormatter(Formatter):
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        raise NotImplementedError("Formula elements are not yet supported in Madoko output.")
+        self.ofile.write(f'$${element.content}$$\n\n')
 
     def get_accent(self, text):
-        return ' _' + text + '_ '
+        return self._format_with_preserved_whitespace(text, '_')
 
     def get_strong(self, text):
-        return ' __' + text + '__ '
+        return self._format_with_preserved_whitespace(text, '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -511,13 +589,13 @@ format:
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        raise NotImplementedError("Formula elements are not yet supported in Marp output.")
+        self.ofile.write(f'$${element.content}$$\n\n')
 
     def get_accent(self, text):
-        return ' _' + text + '_ '
+        return self._format_with_preserved_whitespace(text, '_')
 
     def get_strong(self, text):
-        return ' __' + text + '__ '
+        return self._format_with_preserved_whitespace(text, '__')
 
     def get_colored(self, text, rgb):
         return ' <span style="color:%s">%s</span> ' % (rgb_to_hex(rgb), text)
@@ -1086,7 +1164,7 @@ img[alt~="right"] {
         self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
-        raise NotImplementedError("Formula elements are not yet supported in Marp output.")
+        self.ofile.write(f'$${element.content}$$\n\n')
 
     def put_table(self, table):
         gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />')  if not '`' in c else c.replace('\n', ' ') for c in row]) + ' |'
@@ -1095,14 +1173,10 @@ img[alt~="right"] {
         self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
     def get_accent(self, text): # Italics
-        if not text.strip(): # If text is empty or all whitespace
-            return text      # Return original text (empty or whitespace)
-        return '*' + text.strip() + '*' 
+        return self._format_with_preserved_whitespace(text, "*")
 
     def get_strong(self, text): # Bold
-        if not text.strip(): # If text is empty or all whitespace
-            return text      # Return original text (empty or whitespace)
-        return '**' + text.strip() + '**'
+        return self._format_with_preserved_whitespace(text, "**")
 
     def get_colored(self, text, rgb):
         # Standard HTML for color, Marp should support it

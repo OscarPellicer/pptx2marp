@@ -51,17 +51,6 @@ from pptx2md.utils import emu_to_px # Assuming emu_to_px is now in utils
 logger = logging.getLogger(__name__)
 
 picture_count = 0
-formula_count = 0 # Add counter for formula images
-
-# Known Program IDs for Equation Editors (can be expanded)
-EQUATION_PROG_IDS = [
-    "Equation.3",  # Microsoft Equation Editor 3.0
-    "MathType.Equation", # Design Science MathType
-    "MSGraph.Chart", # Sometimes equations are embedded as MSGraph objects that render as images
-    "Word.Document.8", # Embedded Word 97-2003 doc (could contain equation)
-    "Word.Document.12", # Embedded Word 2007+ doc (could contain equation)
-]
-
 
 def is_code_font(font) -> bool:
     """Checks if the font is a common monospaced/code font."""
@@ -114,6 +103,8 @@ def is_accent(font):
          font.color.theme_color == MSO_THEME_COLOR.ACCENT_6))
         )
 
+def is_math(text):
+    return text and ( text.startswith('$') and text.endswith('$') )
 
 def is_strong(font):
     return font and (font.bold or 
@@ -137,6 +128,8 @@ def get_text_runs(para) -> List[TextRun]:
             result.style.is_accent = True
         if is_strong(run.font):
             result.style.is_strong = True
+        if is_math(run.text):
+            result.style.is_math = True
         if run.font and (run.font.color.type == MSO_COLOR_TYPE.RGB):
             result.style.color_rgb = run.font.color.rgb
         if run.font and is_code_font(run.font):
@@ -239,36 +232,109 @@ def process_text_blocks(config: ConversionConfig, shape, slide_idx) -> List[Unio
     return results
 
 
-def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageElement, None]:
-    if config.disable_image:
-        return None
-
-    if not hasattr(shape, 'image') or not shape.image:
-        logger.warning(f"Shape in slide {slide_idx} seems to be a picture but has no image data, skipped.")
-        return None
-
-    global picture_count
-
-    # Initial properties from shape.image
-    original_pic_ext = shape.image.ext.lower()
-    current_image_blob = shape.image.blob
-    # Pillow uses 'JPEG' for '.jpg', so map common extensions
-    pil_format_map = {'jpg': 'JPEG', 'jpeg': 'JPEG', 'tif': 'TIFF', 'tiff': 'TIFF'}
-    current_pil_format = pil_format_map.get(original_pic_ext, original_pic_ext.upper())
+def _crop_image_if_needed(
+    img_to_process: Image.Image, 
+    crop_l_pct: float, 
+    crop_r_pct: float, 
+    crop_t_pct: float, 
+    crop_b_pct: float,
+    current_pil_format: str,
+    original_blob: bytes,
+    slide_idx: int,
+    config: ConversionConfig
+) -> tuple[Union[Image.Image, None], bytes, Union[tuple[int, int], None], tuple[Union[float, None], Union[float, None], Union[float, None], Union[float, None]]]:
+    """
+    Applies cropping to a Pillow Image object if specified and enabled.
+    Returns the (potentially) cropped image object, its blob, its new dimensions,
+    and the crop percentages to be stored in ImageElement.
+    """
+    pil_original_w, pil_original_h = img_to_process.size
+    cropped_img_obj = img_to_process
+    current_image_blob = original_blob # Start with original if crop fails or not applied
+    final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h
     
-    # --- WMF Conversion (if applicable, happens before cropping) ---
+    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
+
+    has_crop_info = (crop_l_pct > 0.00001 or crop_r_pct > 0.00001 or 
+                     crop_t_pct > 0.00001 or crop_b_pct > 0.00001)
+
+    if has_crop_info and config.apply_cropping_in_parser:
+        left = int(round(pil_original_w * crop_l_pct))
+        top = int(round(pil_original_h * crop_t_pct))
+        right = int(round(pil_original_w * (1.0 - crop_r_pct)))
+        bottom = int(round(pil_original_h * (1.0 - crop_b_pct)))
+
+        if left < right and top < bottom:
+            try:
+                cropped_img_obj = img_to_process.crop((left, top, right, bottom))
+                logger.info(f'Image in slide {slide_idx} pre-cropped in parser. New blob dims: {cropped_img_obj.size}')
+                with io.BytesIO() as cropped_blob_io:
+                    save_format = current_pil_format if current_pil_format else 'PNG'
+                    try:
+                        cropped_img_obj.save(cropped_blob_io, format=save_format)
+                    except KeyError: 
+                        logger.warning(f"Format {save_format} not supported by Pillow for saving, falling back to PNG.")
+                        save_format = 'PNG'
+                        if cropped_img_obj.mode != 'RGBA' and cropped_img_obj.mode != 'RGB':
+                            cropped_img_obj = cropped_img_obj.convert('RGBA')
+                        cropped_img_obj.save(cropped_blob_io, format=save_format)
+                    current_image_blob = cropped_blob_io.getvalue()
+                
+                final_blob_w_px, final_blob_h_px = cropped_img_obj.size
+                # Cropping applied, so no percentages needed for ImageElement
+                crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
+            except Exception as e:
+                logger.warning(f"Failed to apply crop in parser for image in slide {slide_idx}. Error: {e}")
+                # Fallback: use uncropped dimensions, and pass crop info
+                cropped_img_obj = img_to_process # Revert to original if crop failed
+                current_image_blob = original_blob # Revert to original blob
+                final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h
+                if has_crop_info: # Still pass the crop info if it existed
+                    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
+                        crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
+        else:
+            logger.warning(f"Invalid crop dimensions for image in slide {slide_idx}, not applying crop in parser.")
+            final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h
+            if has_crop_info: # Pass the crop info
+                crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
+                    crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
+    
+    elif has_crop_info: # Cropping info exists, but apply_cropping_in_parser is False
+        logger.info(f"Parser cropping disabled for image in slide {slide_idx}. Crop info will be passed to formatter.")
+        final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h # Dimensions of uncropped blob
+        crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
+            crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
+    else: # No crop defined on shape, or Pillow couldn't open
+        # final_blob_w_px, final_blob_h_px already set from img_to_process.size
+        crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
+
+    return cropped_img_obj, current_image_blob, (final_blob_w_px, final_blob_h_px), \
+           (crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element)
+
+
+def _handle_wmf_conversion(
+    current_image_blob: bytes,
+    original_pic_ext: str,
+    config: ConversionConfig,
+    slide_idx: int,
+    picture_idx_for_temp_name: int
+) -> tuple[bytes, str, str, bool]:
+    """
+    Handles WMF to PNG conversion if WMF is detected and not disabled.
+    Returns the image blob, pic_ext, pil_format, and a flag indicating if conversion occurred.
+    """
+    updated_blob = current_image_blob
+    updated_ext = original_pic_ext
+    updated_pil_format = pil_format_map.get(original_pic_ext, original_pic_ext.upper()) # Calculate initial PIL format
     converted_from_wmf = False
+
     if original_pic_ext == 'wmf':
-        if config.disable_wmf: # User wants to keep WMF as is, no conversion, no cropping by Pillow
-            # Save WMF as is, ImageElement will reflect this
-            # The rest of the logic will treat it like any other image but Pillow won't process it
-            # This means no pre-cropping by this script.
-            pass
+        if config.disable_wmf:
+            logger.info(f"WMF image in slide {slide_idx} will be kept as original WMF (processing disabled).")
+            # Blob, ext, and pil_format remain as is for WMF
         else:
             try:
-                # Create a temporary path for Wand to read the WMF blob from
-                # as Wand typically works with filenames.
-                temp_wmf_path = Path(config.image_dir) / f"__temp_wmf_{picture_count}.{original_pic_ext}"
+                temp_wmf_path = Path(config.image_dir) / f"__temp_wmf_{picture_idx_for_temp_name}.wmf"
                 with open(temp_wmf_path, 'wb') as tmp_f:
                     tmp_f.write(current_image_blob)
 
@@ -277,166 +343,266 @@ def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageEl
                     img.format = 'png'
                     with io.BytesIO() as png_blob_io:
                         img.save(file=png_blob_io)
-                        current_image_blob = png_blob_io.getvalue()
-                current_pil_format = 'PNG'
-                original_pic_ext = 'png' # Update extension for saving
+                        updated_blob = png_blob_io.getvalue()
+                
+                updated_pil_format = 'PNG'
+                updated_ext = 'png'
                 converted_from_wmf = True
                 logger.info(f'WMF image in slide {slide_idx} converted to PNG for processing.')
-                if temp_wmf_path.exists(): # Clean up temp file
+                
+                if temp_wmf_path.exists():
                     try:
                         os.remove(temp_wmf_path)
                     except OSError as e:
                         logger.warning(f"Could not remove temp WMF file {temp_wmf_path}: {e}")
-
             except Exception as e:
                 logger.warning(
-                    f'Cannot convert wmf image in slide {slide_idx} to png for cropping, attempting to save as original. Error: {e}')
-                # Fallback: treat as uncroppable by this script if WMF conversion failed
-                # The original blob and ext will be used.
-                # If disable_wmf was false, this means we tried and failed.
+                    f'Cannot convert WMF image in slide {slide_idx} to PNG. Error: {e}. '
+                    f'Attempting to use original WMF if possible.'
+                )
+                # Fallback: blob, ext, pil_format remain as original WMF
+                updated_blob = current_image_blob 
+                updated_ext = original_pic_ext
+                updated_pil_format = pil_format_map.get(original_pic_ext, original_pic_ext.upper())
+
+    return updated_blob, updated_ext, updated_pil_format, converted_from_wmf
 
 
-    # --- Image Cropping with Pillow (on original or WMF-converted blob) ---
-    img_to_process = None
-    needs_saving_after_pillow = False # Flag if Pillow processing happens
+def _handle_tiff_conversion(
+    current_image_blob: bytes,
+    original_pic_ext: str, # This ext might be 'png' if WMF conversion happened
+    current_pil_format: str,
+    slide_idx: int
+) -> tuple[bytes, str, str]:
+    """
+    Handles TIFF to PNG conversion if TIFF is detected.
+    Assumes WMF conversion (if any) has already occurred.
+    Returns the image blob, pic_ext, and pil_format.
+    """
+    updated_blob = current_image_blob
+    updated_ext = original_pic_ext
+    updated_pil_format_out = current_pil_format
 
-    if not (original_pic_ext == 'wmf' and config.disable_wmf): # Don't process WMF with Pillow if disabled
+    # Check original_pic_ext which is the true source before this stage (or after WMF conversion)
+    if original_pic_ext in ['tif', 'tiff']:
+        logger.info(f"Image in slide {slide_idx} is TIFF ({original_pic_ext}), attempting conversion to PNG.")
         try:
-            img_to_process = Image.open(io.BytesIO(current_image_blob))
-            # Ensure image is in a mode that supports saving to its target format (especially for transparency)
-            if current_pil_format == 'PNG' and img_to_process.mode != 'RGBA':
-                img_to_process = img_to_process.convert('RGBA')
-            elif img_to_process.mode == 'P': # Palette mode, convert to RGB/RGBA
-                 img_to_process = img_to_process.convert('RGBA' if 'A' in img_to_process.mode else 'RGB')
-
-
-            needs_saving_after_pillow = True # Will need re-saving if opened by Pillow
-        except Exception as e:
-            logger.warning(f"Pillow could not open image blob for slide {slide_idx} (ext: {original_pic_ext}). Error: {e}. Skipping Pillow processing.")
-            img_to_process = None # Cannot process further with Pillow
-            needs_saving_after_pillow = False
-
-
-    # These will be the dimensions of the image data *after* Pillow processing.
-    # If Pillow fails or is skipped, they'll be from shape.image.size.
-    
-    # Initialize final dimensions to be those of the image blob *before* potential cropping
-    if img_to_process:
-        final_blob_w_px, final_blob_h_px = img_to_process.size
-    elif hasattr(shape.image, 'size') and shape.image.size:
-        final_blob_w_px, final_blob_h_px = shape.image.size
-    else:
-        final_blob_w_px, final_blob_h_px = None, None
-
-    # Initialize crop percentages to be passed to ImageElement if not applied
-    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
-
-    if img_to_process:
-        pil_original_w, pil_original_h = img_to_process.size # Dimensions before any Pillow crop
-
-        crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct = 0.0, 0.0, 0.0, 0.0
-        has_crop_info = False
-        if hasattr(shape, 'crop_left') and shape.crop_left > 0.00001: # Use small epsilon
-                crop_l_pct = shape.crop_left; has_crop_info = True
-        if hasattr(shape, 'crop_right') and shape.crop_right > 0.00001:
-                crop_r_pct = shape.crop_right; has_crop_info = True
-        if hasattr(shape, 'crop_top') and shape.crop_top > 0.00001:
-                crop_t_pct = shape.crop_top; has_crop_info = True
-        if hasattr(shape, 'crop_bottom') and shape.crop_bottom > 0.00001:
-                crop_b_pct = shape.crop_bottom; has_crop_info = True
-
-        if has_crop_info and config.apply_cropping_in_parser:
-            left = int(round(pil_original_w * crop_l_pct))
-            top = int(round(pil_original_h * crop_t_pct))
-            right = int(round(pil_original_w * (1.0 - crop_r_pct)))
-            bottom = int(round(pil_original_h * (1.0 - crop_b_pct)))
-
-            if left < right and top < bottom:
-                try:
-                    img_to_process = img_to_process.crop((left, top, right, bottom))
-                    logger.info(f'Image in slide {slide_idx} pre-cropped in parser. New blob dims: {img_to_process.size}')
-                    with io.BytesIO() as cropped_blob_io:
-                        save_format = current_pil_format if current_pil_format else 'PNG'
-                        try:
-                            img_to_process.save(cropped_blob_io, format=save_format)
-                        except KeyError: 
-                            logger.warning(f"Format {save_format} not supported by Pillow for saving, falling back to PNG.")
-                            save_format = 'PNG'
-                            if img_to_process.mode != 'RGBA' and img_to_process.mode != 'RGB':
-                                img_to_process = img_to_process.convert('RGBA')
-                            img_to_process.save(cropped_blob_io, format=save_format)
-                        current_image_blob = cropped_blob_io.getvalue()
-                    
-                    final_blob_w_px, final_blob_h_px = img_to_process.size
-                    # Cropping applied, so no percentages needed for ImageElement
-                    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
-                except Exception as e:
-                    logger.warning(f"Failed to apply crop in parser for image in slide {slide_idx}. Error: {e}")
-                    # Fallback: use uncropped dimensions, and pass crop info
-                    final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h
-                    if has_crop_info: # Still pass the crop info if it existed
-                        crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
-                            crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
-            else:
-                logger.warning(f"Invalid crop dimensions for image in slide {slide_idx}, not applying crop in parser.")
-                final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h
-                if has_crop_info: # Pass the crop info
-                    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
-                        crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
-        elif has_crop_info: # Cropping info exists, but apply_cropping_in_parser is False
-            logger.info(f"Parser cropping disabled for image in slide {slide_idx}. Crop info will be passed to formatter.")
-            final_blob_w_px, final_blob_h_px = pil_original_w, pil_original_h # Dimensions of uncropped blob
-            crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = \
-                crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct
-        else: # No crop defined on shape.pic, or Pillow couldn't open
-            # final_blob_w_px, final_blob_h_px already set from img_to_process.size or shape.image.size
-            crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
+            img_from_tiff: Image.Image
+            with io.BytesIO(current_image_blob) as tiff_bytes_io:
+                img_from_tiff = Image.open(tiff_bytes_io)
+                img_from_tiff.load() 
             
-    # If Pillow processing was skipped entirely (e.g. disabled WMF)
-    # final_blob_w_px, final_blob_h_px would have been set from shape.image.size initially.
-    # Ensure they are not None if possible.
-    if final_blob_w_px is None and hasattr(shape.image, 'size') and shape.image.size:
-         final_blob_w_px, final_blob_h_px = shape.image.size
+            if img_from_tiff.mode != 'RGBA':
+                img_from_tiff = img_from_tiff.convert('RGBA')
+
+            with io.BytesIO() as png_bytes_io:
+                img_from_tiff.save(png_bytes_io, format='PNG')
+                updated_blob = png_bytes_io.getvalue()
+            
+            updated_ext = 'png'
+            updated_pil_format_out = 'PNG'
+            logger.info(f"TIFF image in slide {slide_idx} successfully converted to PNG.")
+        except Exception as e:
+            logger.warning(
+                f"Failed to convert TIFF image in slide {slide_idx} from .{original_pic_ext} to PNG. Error: {e}. "
+                f"Proceeding with original TIFF data. Markdown output may not display this image."
+            )
+            # Fallback: blob, ext, pil_format remain as original TIFF
+            updated_blob = current_image_blob
+            updated_ext = original_pic_ext
+            updated_pil_format_out = pil_format_map.get(original_pic_ext, original_pic_ext.upper())
 
 
-    # --- Saving the final blob ---
+    return updated_blob, updated_ext, updated_pil_format_out
+
+
+def _open_and_prepare_image_with_pillow(
+    image_blob: bytes,
+    pic_ext: str, # Extension of the blob (could be original, or png after wmf/tiff conversion)
+    pil_format_for_opening: str, # PIL format string for the blob
+    slide_idx: int,
+    shape, # Original pptx shape, for fallback dimensions
+    is_wmf_processing_disabled_for_this_image: bool 
+) -> tuple[Union[Image.Image, None], Union[int, None], Union[int, None]]:
+    """
+    Opens an image blob with Pillow, prepares it (e.g., converts mode), 
+    and returns the Pillow image object and its dimensions.
+    Handles cases where Pillow cannot open the image or WMF processing is disabled.
+    """
+    img_to_process = None
+    blob_w_px, blob_h_px = None, None
+
+    # Skip Pillow processing entirely for WMFs if config.disable_wmf is True.
+    # The pic_ext here would still be 'wmf'.
+    if pic_ext == 'wmf' and is_wmf_processing_disabled_for_this_image:
+        logger.info(f"Pillow processing skipped for WMF image in slide {slide_idx} as per config.")
+        if hasattr(shape.image, 'size') and shape.image.size:
+            blob_w_px, blob_h_px = shape.image.size
+        return None, blob_w_px, blob_h_px
+
+    try:
+        img_to_process = Image.open(io.BytesIO(image_blob))
+        # Ensure image data is loaded to prevent issues with closed streams later if blob was from BytesIO
+        img_to_process.load()
+
+        # Standardize modes for common output formats or problematic input modes
+        if pil_format_for_opening == 'PNG' and img_to_process.mode != 'RGBA':
+            img_to_process = img_to_process.convert('RGBA')
+        elif img_to_process.mode == 'P': # Paletted images
+            # Convert to RGBA if transparency might be present, else RGB
+            img_to_process = img_to_process.convert('RGBA' if 'A' in img_to_process.info.get('transparency', []) else 'RGB')
+        elif img_to_process.mode == 'CMYK':
+            img_to_process = img_to_process.convert('RGB')
+        
+        blob_w_px, blob_h_px = img_to_process.size
+    except Exception as e:
+        logger.warning(
+            f"Pillow could not open/process image blob for slide {slide_idx} (ext: {pic_ext}, PIL format: {pil_format_for_opening}). Error: {e}. "
+            f"Skipping Pillow processing for this image."
+        )
+        img_to_process = None
+        if hasattr(shape.image, 'size') and shape.image.size: # Fallback to shape.image.size
+            blob_w_px, blob_h_px = shape.image.size
+        # else blob_w_px, blob_h_px remain None
+
+    return img_to_process, blob_w_px, blob_h_px
+
+
+def _save_image_and_get_path(
+    image_blob_to_save: bytes,
+    config: ConversionConfig,
+    pic_ext_for_filename: str, # The extension to use for the saved file (e.g., 'png' after conversion)
+    current_picture_idx: int
+) -> str:
+    """Saves the image blob to a file and returns its relative path for markdown."""
     file_prefix = ''.join(os.path.basename(config.pptx_path).split('.')[:-1])
-    # Use original_pic_ext which is now 'png' if WMF was converted and processed
-    pic_name_for_save = file_prefix + f'_{picture_count}'
+    pic_name_for_save = file_prefix + f'_{current_picture_idx}'
     
-    # Ensure image directory exists
     img_dir_path_obj = Path(config.image_dir)
     if not img_dir_path_obj.exists():
         img_dir_path_obj.mkdir(parents=True, exist_ok=True)
     
-    # Final output path uses original_pic_ext (which might have been updated from wmf to png)
-    output_path_obj = img_dir_path_obj / f'{pic_name_for_save}.{original_pic_ext}'
+    output_path_obj = img_dir_path_obj / f'{pic_name_for_save}.{pic_ext_for_filename}'
 
     with open(output_path_obj, 'wb') as f:
-        f.write(current_image_blob)
-    picture_count += 1
+        f.write(image_blob_to_save)
 
-
-    # Determine relative path for ImageElement
     config_output_path_obj = Path(config.output_path)
     try:
         base_for_relpath = config_output_path_obj.parent 
         img_outputter_path = os.path.relpath(output_path_obj, base_for_relpath)
     except ValueError: 
+        # This can happen if output_path_obj and base_for_relpath are on different drives on Windows
         img_outputter_path = str(output_path_obj.resolve())
     
-    saved_path_str = str(img_outputter_path).replace('\\', '/')
+    return str(img_outputter_path).replace('\\', '/')
 
-    # ImageElement properties
-    # original_w/h_px are now the dimensions of the (potentially cropped) saved file
-    # display_w/h_px are how this saved file is framed on the slide
+
+# pil_format_map needs to be accessible by the helper functions if they are top-level
+# or passed as an argument. For now, keeping it module-level.
+pil_format_map = {'jpg': 'JPEG', 'jpeg': 'JPEG', 'tif': 'TIFF', 'tiff': 'TIFF'}
+
+
+def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageElement, None]:
+    if config.disable_image:
+        return None
+
+    if not hasattr(shape, 'image') or not shape.image:
+        logger.warning(f"Shape in slide {slide_idx} seems to be a picture but has no image data, skipped.")
+        return None
+
+    global picture_count # Used for unique naming and WMF temp file
+
+    # Initial properties from shape.image
+    initial_pic_ext = shape.image.ext.lower()
+    current_image_blob = shape.image.blob
+    # current_pil_format will be determined after potential WMF/TIFF conversions.
+    
+    # WMF Conversion
+    # picture_count is used here for a unique temporary WMF filename if conversion occurs.
+    current_image_blob, effective_pic_ext, effective_pil_format, converted_from_wmf = \
+        _handle_wmf_conversion(current_image_blob, initial_pic_ext, config, slide_idx, picture_count)
+
+    # TIFF to PNG Conversion (if not already PNG from WMF)
+    # This operates on the blob and ext potentially modified by WMF conversion.
+    if not converted_from_wmf and effective_pic_ext in ['tif', 'tiff']:
+        current_image_blob, effective_pic_ext, effective_pil_format = \
+            _handle_tiff_conversion(current_image_blob, effective_pic_ext, effective_pil_format, slide_idx)
+    
+    # Image Cropping and Pillow Processing
+    img_to_process_for_crop = None
+    final_blob_w_px, final_blob_h_px = None, None # Dimensions of the blob that will be saved
+    crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
+
+    # Determine if Pillow should skip processing this image (e.g. WMF explicitly disabled)
+    # initial_pic_ext is used here to check original type for disable_wmf logic
+    is_wmf_and_disabled = (initial_pic_ext == 'wmf' and config.disable_wmf)
+
+    img_to_process_for_crop, initial_blob_w_px, initial_blob_h_px = \
+        _open_and_prepare_image_with_pillow(
+            current_image_blob, 
+            effective_pic_ext, # The current extension of the blob
+            effective_pil_format, # The current PIL format of the blob
+            slide_idx, 
+            shape,
+            is_wmf_and_disabled
+        )
+    
+    final_blob_w_px, final_blob_h_px = initial_blob_w_px, initial_blob_h_px # Start with these
+
+    if img_to_process_for_crop: # Pillow opened the image, proceed with potential cropping
+        crop_l_pct = getattr(shape, 'crop_left', 0.0) 
+        crop_r_pct = getattr(shape, 'crop_right', 0.0)
+        crop_t_pct = getattr(shape, 'crop_top', 0.0)
+        crop_b_pct = getattr(shape, 'crop_bottom', 0.0)
+
+        # _crop_image_if_needed takes the Pillow image object and the current blob.
+        # It returns the (potentially) new Pillow object, the (potentially) new blob,
+        # its dimensions, and the crop percentages to store.
+        _cropped_img_obj, current_image_blob, \
+        (final_blob_w_px, final_blob_h_px), \
+        (crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element) = \
+            _crop_image_if_needed(
+                img_to_process_for_crop, 
+                crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct,
+                effective_pil_format, # PIL format of the img_to_process_for_crop
+                current_image_blob,   # Blob corresponding to img_to_process_for_crop
+                slide_idx,
+                config
+            )
+        # current_image_blob is now the (potentially cropped) blob.
+        # final_blob_w_px, final_blob_h_px are dimensions of this current_image_blob.
+    
+    elif initial_blob_w_px is not None: # Pillow didn't open, but we got dimensions from shape.image.size
+        # No cropping can be applied by parser if Pillow didn't open it.
+        # If shape has crop attributes, they should be passed through.
+        has_crop_info_on_shape = (getattr(shape, 'crop_left', 0.0) > 0.00001 or
+                                  getattr(shape, 'crop_right', 0.0) > 0.00001 or
+                                  getattr(shape, 'crop_top', 0.0) > 0.00001 or
+                                  getattr(shape, 'crop_bottom', 0.0) > 0.00001)
+        if has_crop_info_on_shape:
+            crop_l_for_element = getattr(shape, 'crop_left', 0.0)
+            crop_r_for_element = getattr(shape, 'crop_right', 0.0)
+            crop_t_for_element = getattr(shape, 'crop_top', 0.0)
+            crop_b_for_element = getattr(shape, 'crop_bottom', 0.0)
+            logger.info(f"Image in slide {slide_idx} (ext: {effective_pic_ext}) could not be opened by Pillow. "
+                        f"Crop info from shape will be passed to formatter if present.")
+
+    # Saving the final blob
+    # effective_pic_ext is used for the filename extension (e.g., 'png' if converted)
+    saved_path_str = _save_image_and_get_path(
+        current_image_blob, config, effective_pic_ext, picture_count
+    )
+    picture_count += 1 # Increment for the next image
+
+    # Create ImageElement
     image_data = ImageElement(
         path=saved_path_str,
-        original_width_px=final_blob_w_px,
-        original_height_px=final_blob_h_px,
-        original_filename=shape.image.filename if hasattr(shape.image, 'filename') else None, # Original filename from PPTX
-        display_width_px=emu_to_px(shape.width),  # Size of the frame on slide
-        display_height_px=emu_to_px(shape.height), # Size of the frame on slide
+        original_width_px=final_blob_w_px,   # Dimensions of the saved file blob
+        original_height_px=final_blob_h_px,  # Dimensions of the saved file blob
+        original_filename=shape.image.filename if hasattr(shape.image, 'filename') else None,
+        display_width_px=emu_to_px(shape.width),
+        display_height_px=emu_to_px(shape.height),
         left_px=emu_to_px(shape.left),
         top_px=emu_to_px(shape.top),
         rotation=shape.rotation if hasattr(shape, 'rotation') else 0.0,
@@ -472,6 +638,99 @@ def ungroup_shapes(shapes) -> List[SlideElement]:
     return res
 
 
+def _refine_elements(initial_elements: List[SlideElement], slide_idx: int) -> List[SlideElement]:
+    refined_elements: List[SlideElement] = []
+    i = 0
+    while i < len(initial_elements):
+        current_element = initial_elements[i]
+
+        # 1. Check for Math Paragraphs to convert to FormulaElement
+        if isinstance(current_element, ParagraphElement) and \
+           len(current_element.content) == 1 and \
+           current_element.content[0].style.is_math:
+            
+            math_run = current_element.content[0]
+            raw_text = math_run.text.strip() # Strip to handle potential whitespace around $
+            formula_content_for_element: str
+
+            if raw_text.startswith('$$') and raw_text.endswith('$$') and len(raw_text) >= 4:
+                formula_content_for_element = raw_text[2:-2]
+            elif raw_text.startswith('$') and raw_text.endswith('$') and len(raw_text) >= 2:
+                formula_content_for_element = raw_text[1:-1]
+            else:
+                # This case implies is_math was true, but format is unexpected.
+                # Log warning and treat as simple text to avoid formatter errors.
+                logger.warning(
+                    f"Slide {slide_idx}: Math run '{math_run.text}' marked as math "
+                    f"but not in expected $...$ or $$...$$ format. Storing raw."
+                )
+                formula_content_for_element = math_run.text # Store original text
+            
+            formula_el = FormulaElement(content=formula_content_for_element, position=current_element.position)
+            refined_elements.append(formula_el)
+            i += 1
+            continue
+
+        # 2. Check for Code Blocks (merging consecutive code paragraphs)
+        elif isinstance(current_element, ParagraphElement) and \
+             current_element.content and \
+             all(run.style.is_code for run in current_element.content):
+            
+            consecutive_code_paras: List[ParagraphElement] = []
+            scan_idx = i
+            while scan_idx < len(initial_elements):
+                element_to_check = initial_elements[scan_idx]
+                if isinstance(element_to_check, ParagraphElement) and \
+                   element_to_check.content and \
+                   all(run.style.is_code for run in element_to_check.content):
+                    # Additional check: ensure this paragraph wasn't meant to be a math block
+                    # that happened to use a code font and somehow wasn't converted above.
+                    # This is a heuristic: if it also looks like a math block, prioritize math.
+                    # (This check might be redundant if math conversion is robust)
+                    if not (len(element_to_check.content) == 1 and element_to_check.content[0].style.is_math):
+                        consecutive_code_paras.append(element_to_check)
+                    else: # It's a code-styled math paragraph; stop collecting for this code block
+                        break 
+                else: # Not a code paragraph, or different element type
+                    break
+                scan_idx += 1
+            
+            if not consecutive_code_paras: # Should not happen if outer 'if' was true, but defensive
+                refined_elements.append(current_element) # Add current element as is
+                i += 1
+                continue
+
+            if len(consecutive_code_paras) == 1:
+                single_para_element = consecutive_code_paras[0]
+                raw_text_content = "".join(run.text for run in single_para_element.content)
+                
+                if '\n' not in raw_text_content.strip(): # Single line of code
+                    refined_elements.append(single_para_element) 
+                else: # Single paragraph, but multi-line text: treat as a CodeBlock
+                    code_block = CodeBlockElement(content=raw_text_content, 
+                                                  position=single_para_element.position,
+                                                  language=None) 
+                    refined_elements.append(code_block)
+                i += 1 # Processed one element
+            
+            elif len(consecutive_code_paras) > 1: # Multiple consecutive code paragraphs
+                code_lines_texts = ["".join(run.text for run in para.content) for para in consecutive_code_paras]
+                full_code_content = "\n".join(code_lines_texts)
+                first_para_position = consecutive_code_paras[0].position
+                
+                code_block = CodeBlockElement(content=full_code_content, 
+                                              position=first_para_position,
+                                              language=None) 
+                refined_elements.append(code_block)
+                i += len(consecutive_code_paras) # Advance by the number of merged paragraphs
+            
+        else: # Not a special math paragraph, nor the start of a code paragraph sequence
+            refined_elements.append(current_element)
+            i += 1
+            
+    return refined_elements
+
+
 def process_shapes(config: ConversionConfig, current_shapes, slide_id: int) -> List[SlideElement]:
     initial_elements: List[SlideElement] = []
     for shape in current_shapes:
@@ -485,7 +744,7 @@ def process_shapes(config: ConversionConfig, current_shapes, slide_id: int) -> L
                 if pic:
                     initial_elements.append(pic)
             except AttributeError as e:
-                logger.warning(f'Failed to process picture, skipped: {e}')
+                logger.warning(f'Failed to process picture in slide {slide_id}, skipped: {e}')
         elif shape.shape_type == MSO_SHAPE_TYPE.TABLE:
             table = process_table(config, shape, slide_id)
             if table:
@@ -498,62 +757,10 @@ def process_shapes(config: ConversionConfig, current_shapes, slide_id: int) -> L
                     if pic:
                         initial_elements.append(pic)
             except:
-                pass
+                pass # Ignore shapes that are not text, pic, table, or recognized object
 
-    processed_elements: List[SlideElement] = []
-    i = 0
-    while i < len(initial_elements):
-        current_element = initial_elements[i]
-        
-        # Check if current element is the start of a potential code sequence
-        if isinstance(current_element, ParagraphElement) and \
-           current_element.content and \
-           all(run.style.is_code for run in current_element.content):
-            
-            # Collect all consecutive paragraphs where all runs are code-styled
-            consecutive_code_paras: List[ParagraphElement] = []
-            scan_idx = i
-            while scan_idx < len(initial_elements) and \
-                  isinstance(initial_elements[scan_idx], ParagraphElement) and \
-                  initial_elements[scan_idx].content and \
-                  all(run.style.is_code for run in initial_elements[scan_idx].content):
-                consecutive_code_paras.append(initial_elements[scan_idx])
-                scan_idx += 1
-            
-            # Now decide how to treat this sequence
-            if len(consecutive_code_paras) == 1:
-                single_para_element = consecutive_code_paras[0]
-                # Extract raw text content (without any formatting from TextRun)
-                raw_text_content = "".join(run.text for run in single_para_element.content)
-                
-                # If it's a single line, keep as ParagraphElement for inline code formatting
-                if '\n' not in raw_text_content.strip(): # Also strip to check if it's just newlines
-                    processed_elements.append(single_para_element) 
-                    i += 1 # Advance by 1 (the single paragraph processed)
-                else: # Single paragraph, but multi-line: treat as a CodeBlock
-                    code_block = CodeBlockElement(content=raw_text_content, 
-                                                  position=single_para_element.position,
-                                                  language=None) 
-                    processed_elements.append(code_block)
-                    i += 1 # Advance by 1
-            
-            elif len(consecutive_code_paras) > 1: # Multiple consecutive code paragraphs, merge into CodeBlock
-                code_lines_texts = ["".join(run.text for run in para.content) for para in consecutive_code_paras]
-                full_code_content = "\n".join(code_lines_texts)
-                first_para_position = consecutive_code_paras[0].position
-                
-                code_block = CodeBlockElement(content=full_code_content, 
-                                              position=first_para_position,
-                                              language=None) 
-                processed_elements.append(code_block)
-                i += len(consecutive_code_paras) # Advance by the number of merged paragraphs
-            
-            # else: # Should not happen if the outer 'if' condition was met (len would be at least 1)
-            #   pass
-
-        else: # Not a code paragraph, or not the start of a sequence of code paragraphs
-            processed_elements.append(current_element)
-            i += 1
+    # Refine initial elements: convert math paragraphs, merge code blocks
+    processed_elements = _refine_elements(initial_elements, slide_id)
             
     return processed_elements
 
