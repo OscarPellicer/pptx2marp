@@ -24,6 +24,18 @@ from pptx2md.types import ConversionConfig, ElementType, ParsedPresentation, Sli
 from pptx2md.utils import rgb_to_hex
 
 
+# Global variables
+LINES_NORMAL_MAX = 8
+LINES_SMALL_MAX = 12
+LINES_SMALLER_MAX = 18
+LINES_SPLIT_TRIGGER = 18
+
+DEFAULT_SLIDE_WIDTH_PX = 1600
+DEFAULT_SLIDE_HEIGHT_PX = 900
+
+MARP_TARGET_WIDTH_PX = 1280
+MARP_TARGET_HEIGHT_PX = 720
+
 class Formatter:
 
     def __init__(self, config: ConversionConfig):
@@ -313,32 +325,39 @@ class Formatter:
 
         output_segments: List[str] = []
         
+        def _normalize_whitespace_in_run_text(text: str) -> str:
+            # Replace non-breaking space (U+00A0) with a regular space (U+0020).
+            normalized_text = text.replace('\u00A0', ' ')
+            # Narrow No-Break Space
+            normalized_text = normalized_text.replace('\u202F', ' ') 
+            return normalized_text
+
         # Initialize with the first run
-        current_merged_text = runs[0].text
+        current_merged_text = _normalize_whitespace_in_run_text(runs[0].text)
         current_style = runs[0].style
 
         for i in range(1, len(runs)):
             next_run = runs[i]
+            normalized_next_text = _normalize_whitespace_in_run_text(next_run.text)
+
             if self._styles_are_compatible(current_style, next_run.style):
                 # Styles are compatible, merge text
-                current_merged_text += next_run.text
+                current_merged_text += normalized_next_text
             else:
                 # Styles differ, format the accumulated text and add to segments
-                # Process if text exists or if it's an intentionally empty code run
-                if current_merged_text or (current_style and current_style.is_code):
+                # Process if text exists or if it's an intentionally empty code/math run
+                if current_merged_text or (current_style and (current_style.is_code or current_style.is_math)):
                      output_segments.append(self._format_single_merged_run(current_merged_text, current_style))
                 
                 # Start a new merged run
-                current_merged_text = next_run.text
+                current_merged_text = normalized_next_text
                 current_style = next_run.style
             
         # Format the last accumulated run
-        if current_merged_text or (current_style and current_style.is_code):
+        if current_merged_text or (current_style and (current_style.is_code or current_style.is_math)):
             output_segments.append(self._format_single_merged_run(current_merged_text, current_style))
             
         final_text = "".join(output_segments)
-        
-        # The .strip() at the end of the original get_formatted_runs was on the final joined string.
         return final_text.strip()
 
     def put_para(self, text):
@@ -403,44 +422,51 @@ class Formatter:
         return self._format_text_with_delimiters(text, '__', '__')
 
     def get_inline_math(self, text: str) -> str:
-        """Formats text as inline math, preserving surrounding whitespace.
-           If text is already correctly $...$-delimited (but not $$...$$),
-           it ensures whitespace is external. Otherwise, wraps with $.
-        """
         if not text:
+            return ""
+
+        # 1. Isolate Overall Whitespace from the input `text`
+        original_len = len(text)
+        text_lstripped = text.lstrip()
+        
+        if not text_lstripped: # Original text was all whitespace or empty
             return text
-
-        # 1. Extract leading and trailing whitespace
-        leading_whitespace = ""
-        trailing_whitespace = ""
-        core_text = text
-
-        # Find leading whitespace
-        for i, char_val in enumerate(text):
-            if not char_val.isspace():
-                leading_whitespace = text[:i]
-                core_text = text[i:]
-                break
-        else: return text
-        # Find trailing whitespace
-        for i in range(len(core_text) - 1, -1, -1):
-            if not core_text[i].isspace():
-                trailing_whitespace = core_text[i+1:]
-                core_text = core_text[:i+1]
-                break
-        if not core_text: return text
-
-
-        # If core_text is already $...$ (but not $$...$$), use it.
-        # Otherwise, wrap with $.
-        if (core_text.startswith('$') and core_text.endswith('$') and
-            not (core_text.startswith('$$') and core_text.endswith('$$'))):
-            final_math_part = core_text
-        else:
-            final_math_part = f"${core_text}$"
             
-        return f"{leading_whitespace}{final_math_part}{trailing_whitespace}"
+        overall_lw_len = original_len - len(text_lstripped)
+        overall_lw = text[:overall_lw_len]
 
+        core_run_text = text_lstripped.rstrip() # This is the central content of the run
+        
+        overall_tw_len = len(text_lstripped) - len(core_run_text)
+        overall_tw = text_lstripped[len(core_run_text):] if overall_tw_len > 0 else ""
+
+        # 2. Identify Formula Candidate Payload from core_run_text
+        formula_candidate_payload: str
+        if (core_run_text.startswith('$') and core_run_text.endswith('$') and
+            len(core_run_text) >= 2 and
+            not (core_run_text.startswith('$$') and core_run_text.endswith('$$'))):
+            formula_candidate_payload = core_run_text[1:-1]
+        else:
+            formula_candidate_payload = core_run_text
+        
+        # 3. Separate True Math Symbols from any trailing text within the candidate payload
+        #    Example: if formula_candidate_payload is "x_s ", actual_math_symbols = "x_s", internal_trailing_text = " "
+        actual_math_symbols = formula_candidate_payload.rstrip()
+        internal_trailing_text = formula_candidate_payload[len(actual_math_symbols):]
+
+        # 4. Clean the actual math symbols (e.g., strip leading spaces from them)
+        #    Example: if actual_math_symbols was "  x_s", cleaned_math_symbols = "x_s"
+        cleaned_math_symbols = actual_math_symbols.strip()
+
+        # 5. Format the cleaned math symbols
+        formatted_math: str
+        if not cleaned_math_symbols:
+            formatted_math = "$ $"  # Handle case of empty or all-space math content
+        else:
+            formatted_math = f"${cleaned_math_symbols}$"
+            
+        # 6. Reconstruct the string
+        return f"{overall_lw}{formatted_math}{internal_trailing_text}{overall_tw}"
 
     def get_colored(self, text, rgb):
         # Standard HTML for color, Marp should support it
@@ -450,7 +476,7 @@ class Formatter:
         return '[' + text + '](' + url + ')'
 
     def get_escaped(self, text):
-        pass
+        return text
 
     def flush(self):
         # If writing directly to file, self.ofile.flush()
@@ -803,21 +829,6 @@ format:
         text = re.sub(self.esc_re1, self.esc_repl, text)
         text = re.sub(self.esc_re2, self.esc_repl, text)
         return text
-
-
-LINES_NORMAL_MAX = 8
-LINES_SMALL_MAX = 12
-LINES_SMALLER_MAX = 18
-LINES_SPLIT_TRIGGER = 18
-
-# Default slide dimensions for position hinting (can be made configurable)
-# These will now serve as fallbacks if not provided by config
-DEFAULT_SLIDE_WIDTH_PX = 1600
-DEFAULT_SLIDE_HEIGHT_PX = 900
-
-MARP_TARGET_WIDTH_PX = 1280
-MARP_TARGET_HEIGHT_PX = 720
-
 
 class MarpFormatter(Formatter):
     # write outputs to marp markdown
@@ -1373,9 +1384,19 @@ class BeamerFormatter(Formatter):
             '>': r'\textgreater{}',
             '|': r'\textbar{}',
             '"': r"''", # Using typographic quotes for `"`
+            '\u2019': r"'", # Typographic right single quote (U+2019) to apostrophe
+            # Add other common typographic chars if needed, using their Unicode escapes:
+            '\u2018': r"`",   # Typographic left single quote (U+2018) to grave accent
+            '\u201C': r"``",  # Typographic left double quote (U+201C) to double grave
+            '\u201D': r"''",  # Typographic right double quote (U+201D) to double apostrophe
+            '\u2013': r"--",  # en-dash (U+2013) to TeX en-dash
+            '\u2014': r"---", # em-dash (U+2014) to TeX em-dash
+            # Non-breaking space is handled in get_formatted_runs, but for completeness:
+            '\u00A0': r"~", # Non-breaking space to TeX tie (~) OR " " if preferred
         }
         self.esc_re = re.compile('|'.join(re.escape(key) for key in self.esc_map.keys()))
         self.in_frame = False
+        self.current_list_level = 0 # 0 = no list active, 1 = first level itemize, etc.
         # REMOVED: self._buffer = io.StringIO() # Base class handles this
 
     def write(self, text: str): # Now uses inherited Formatter.write()
@@ -1452,6 +1473,7 @@ class BeamerFormatter(Formatter):
 \usepackage{hyperref} % For hyperlinks
 \usepackage{amsmath}  % For math
 \usepackage{amssymb}  % For math symbols
+\usepackage{wrapfig}  % For text wrapping around figures
 % \usepackage{listings} % For code blocks (optional, more advanced)
 % \usepackage{minted} % For code blocks (optional, powerful, needs shell-escape)
 
@@ -1482,26 +1504,43 @@ class BeamerFormatter(Formatter):
                 slide_elements_for_processing = slide.elements
             elif slide.type == SlideType.MultiColumn:
                 is_multicolumn_slide_type = True
-                # For MultiColumn, preface is handled first, then columns.
-                # The decision to use Beamer columns will be based on content_for_columns.
-                slide_elements_for_processing = slide.preface # Process preface elements normally first
+                slide_elements_for_processing = slide.preface
                 original_columns_data = slide.columns
-
 
             if not slide_elements_for_processing and not (is_multicolumn_slide_type and original_columns_data):
                 if slide_idx < len(presentation_data.slides) - 1:
-                    self.write(r'\begin{frame}{}\end{frame}' + '\n\n')
+                    self.write(r'\begin{frame}{}\end{frame}' + '\n\n') 
                 continue
 
-
-            # Metrics for font scaling are based on ALL text elements on the slide initially
-            # This includes preface and what might go into columns.
-            initial_all_text_elements = slide.preface + [el for col in slide.columns for el in col] if is_multicolumn_slide_type else slide_elements_for_processing
+            initial_all_text_elements = slide.preface + [el for col in (original_columns_data or []) for el in col] if is_multicolumn_slide_type else slide_elements_for_processing
             line_count, _, _, _, text_lines_for_avg, text_chars_for_avg = \
                 self._get_slide_content_metrics(initial_all_text_elements)
             density_class = self._get_slide_density_class(line_count)
             
-            self.write(r'\begin{frame}')
+            self.write(r'\begin{frame}') # Open the frame
+            self.in_frame = True
+            
+            main_title_element: Optional[SlideElement] = None
+            content_after_title: List[SlideElement] = [] 
+
+            if slide_elements_for_processing and slide_elements_for_processing[0].type == ElementType.Title:
+                main_title_element = slide_elements_for_processing[0]
+                content_after_title = slide_elements_for_processing[1:]
+                
+                title_text_runs = main_title_element.content if isinstance(main_title_element.content, list) else None
+                title_text_str = main_title_element.content if isinstance(main_title_element.content, str) else None
+                formatted_title = ""
+                if title_text_runs: formatted_title = self.get_formatted_runs(title_text_runs)
+                elif title_text_str: formatted_title = self.get_escaped(title_text_str.strip())
+                
+                if formatted_title:
+                    # Correctly place \frametitle
+                    self.write(f'\n\\frametitle{{{formatted_title}}}\n') 
+                    self.last_title_info = (formatted_title, main_title_element.level)
+            else:
+                # No title, so all elements are content after (non-existent) title
+                content_after_title = slide_elements_for_processing
+            
             current_font_scale_opened = False
             if density_class == "small": 
                 self.write(r'{\small' + "\n")
@@ -1513,39 +1552,7 @@ class BeamerFormatter(Formatter):
                 self.write(r'{\scriptsize' + "\n")
                 current_font_scale_opened = True
 
-            self.in_frame = True
-            
-            # Handle Frame Title (from the first title in preface or general elements)
-            # This part processes elements that are *not* part of the explicit Beamer columns structure yet.
-            # If it's a MultiColumn slide, these are `slide.preface`.
-            # If it's General, these are `slide.elements` (which might later be split by our heuristic).
-            
-            main_title_element: Optional[SlideElement] = None
-            # Content elements that might be split into columns or processed as single block
-            content_after_title: List[SlideElement] = [] 
-
-            # Try to set frametitle from the first element of slide_elements_for_processing
-            if slide_elements_for_processing and slide_elements_for_processing[0].type == ElementType.Title:
-                main_title_element = slide_elements_for_processing[0]
-                # Elements after the identified main title become candidates for column splitting or single block
-                content_after_title = slide_elements_for_processing[1:]
-                
-                title_text_runs = main_title_element.content if isinstance(main_title_element.content, list) else None
-                title_text_str = main_title_element.content if isinstance(main_title_element.content, str) else None
-                formatted_title = ""
-                if title_text_runs: formatted_title = self.get_formatted_runs(title_text_runs)
-                elif title_text_str: formatted_title = self.get_escaped(title_text_str.strip())
-                
-                if formatted_title:
-                    self.write(f'{{\\frametitle{{{formatted_title}}}}}\n')
-                    self.last_title_info = (formatted_title, main_title_element.level)
-            else:
-                # No title found at the start of slide_elements_for_processing,
-                # so all of them are candidates for columns/single block.
-                content_after_title = slide_elements_for_processing
-
-
-            # --- Column Splitting Logic (heuristic, similar to Marp) ---
+            # --- Column Splitting Logic ---
             # This heuristic applies if the slide was NOT originally SlideType.MultiColumn,
             # OR if it was, but we want to re-evaluate the `content_after_title` from preface.
             # For now, let's simplify: if slide.type was MultiColumn, we use its structure.
@@ -1574,14 +1581,13 @@ class BeamerFormatter(Formatter):
 
             # --- Output content ---
             if is_multicolumn_slide_type and original_columns_data:
-                # First, output any remaining preface elements that were not the frametitle
-                # If main_title_element was from preface, content_after_title contains rest of preface.
-                if main_title_element and slide_elements_for_processing == slide.preface:
+                # Handle preface elements (if any remain after title extraction)
+                if main_title_element and slide_elements_for_processing == slide.preface: # content_after_title is rest of preface
                      self._put_elements_on_slide(content_after_title) 
                 elif not main_title_element and slide.preface: # No title in preface, output all preface
                      self._put_elements_on_slide(slide.preface)
 
-                # Then, output the Beamer columns from original_columns_data
+                # Output Beamer columns from original_columns_data
                 num_cols = len(original_columns_data)
                 if num_cols > 0:
                     self.write(r'\begin{columns}[T]' + '\n') # [T] for top alignment
@@ -1609,10 +1615,12 @@ class BeamerFormatter(Formatter):
             
             # Notes and end of frame
             if not self.config.disable_notes and slide.notes:
-                self.write(r'\note{' + '\n'.join([self.get_escaped(note) for note in slide.notes]) + '}\n')
+                # Escape notes content
+                escaped_notes = [self.get_escaped(note) for note in slide.notes]
+                self.write(r'\note{' + '\n'.join(escaped_notes) + '}\n')
 
             if current_font_scale_opened: 
-                self.write("\n}\n") 
+                self.write("\n}\n") # Close font scaling group
             
             self.write(r'\end{frame}' + '\n\n')
             self.in_frame = False
@@ -1644,44 +1652,98 @@ class BeamerFormatter(Formatter):
 
     def put_list(self, text: str, level: int):
         # text is already escaped and formatted by get_formatted_runs
-        # LaTeX handles nesting of itemize/enumerate automatically.
-        indent = '  ' * level 
-        self.write(indent + r'\item ' + text.strip() + '\n')
+        # level is 0-indexed from the parser
+        target_latex_nest_level = level + 1 # 1-indexed for LaTeX environment nesting
+
+        # Open new environments if nesting deeper
+        while self.current_list_level < target_latex_nest_level:
+            indent_str = '  ' * self.current_list_level
+            self.write(indent_str + r'\begin{itemize}' + '\n')
+            self.current_list_level += 1
+        
+        # Close environments if un-nesting (going to a shallower level)
+        while self.current_list_level > target_latex_nest_level:
+            self.current_list_level -= 1
+            indent_str = '  ' * self.current_list_level
+            self.write(indent_str + r'\end{itemize}' + '\n')
+
+        # Write the item at the current (now target) nest level
+        # Indentation for the \item itself is based on the original 0-indexed level
+        item_indent_str = '  ' * level 
+        self.write(item_indent_str + r'\item ' + text.strip() + '\n')
 
     def put_para(self, text: str):
         # text is already escaped and formatted by get_formatted_runs
         self.write(text + '\n\n')
 
-    def put_image(self, element: Union[ImageElement, FormulaElement]):
-        alt = element.alt_text if element.alt_text else ""
-        quoted_path = urllib.parse.quote(element.path)
-        
-        options = []
-        # Convert pixel width to a fraction of \textwidth for responsiveness
-        # This is a very rough heuristic.
-        # config.slide_width_px should be available from entry.py
-        slide_width_px = self.config.slide_width_px or DEFAULT_SLIDE_WIDTH_PX # Fallback
-        
-        if element.display_width_px and slide_width_px > 0:
-            # Scale based on Marp's target width (1280px) as a reference for relative sizing
-            # This implies the image was intended to be X proportion of a 1280px wide slide.
-            # For Beamer, we use \textwidth for responsive width.
-            relative_width = element.display_width_px / MARP_TARGET_WIDTH_PX
-            relative_width = min(relative_width, 1.0) # Cap at 100% of textwidth
-            options.append(f'width={relative_width:.2f}\\textwidth')
+    def put_image(self, element: ImageElement):
+        image_path_latex = element.path 
 
-        # TODO: Add position hinting (centering, floating) using Beamer blocks or minipage
+        # Do not include captions automatically, let users handle it
+        caption_text = None
+        # caption_text = self.get_escaped(element.alt_text) if element.alt_text else None
+
+        position_hint = "center" 
+        wrapfig_char_placement = None 
+
+        if element.left_px is not None and element.display_width_px is not None and \
+           self.config.slide_width_px and self.config.slide_width_px > 0:
+            ppt_slide_w = self.config.slide_width_px
+            image_center_ppt = element.left_px + (element.display_width_px / 2)
+            if image_center_ppt < ppt_slide_w / 3.0:
+                position_hint = "left"
+                wrapfig_char_placement = "l" 
+            elif image_center_ppt > ppt_slide_w * (1 - 1/3.0):
+                position_hint = "right"
+                wrapfig_char_placement = "r" 
         
-        options_str = ','.join(options)
-        # Centering images by default for now if they are block elements
-        self.write(r'\begin{center}' + '\n')
-        if options_str:
-            self.write(f'\\includegraphics[{options_str}]{{{quoted_path}}}\n')
+        effective_position_hint = getattr(element, 'position_hint', position_hint)
+        if effective_position_hint == "left":
+            wrapfig_char_placement = "l"
+        elif effective_position_hint == "right":
+            wrapfig_char_placement = "r"
+        
+        # Default wrapfigure width fraction if calculation is not possible or yields too small/large values
+        # This is the fraction of \linewidth that the wrapfigure environment will occupy.
+        wf_width_frac = 0.4 # Default width for wrapfigure: 40% of linewidth
+
+        if element.display_width_px and self.config.slide_width_px and self.config.slide_width_px > 0:
+            ppt_img_frac_of_slide = element.display_width_px / self.config.slide_width_px
+            # Let's make the wrapfigure occupy a space proportional to the image's width on the slide,
+            # but cap it to prevent it from being too dominant or too small.
+            # e.g., if image was 60% of PPT slide, maybe wrapfig takes 50-60% of textwidth.
+            # If image was 10% of PPT slide, maybe wrapfig takes 20-25% of textwidth.
+            wf_width_frac = min(max(0.25, ppt_img_frac_of_slide), 0.6) # Cap between 25% and 60%
+
+        # Options for \includegraphics
+        # Inside wrapfigure, we want the image to fill the wrapfigure's width while keeping aspect ratio.
+        # For centered figures, we can use a similar logic for its width.
+        includegraphics_opts_str = ""
+        if wrapfig_char_placement: # For wrapfigure
+            includegraphics_opts_str = "width=\\linewidth,keepaspectratio"
+        else: # For centered figure
+            # Calculate width for centered image (similar to wf_width_frac but can be larger)
+            center_img_width_frac = 0.7 # Default for centered image
+            if element.display_width_px and self.config.slide_width_px and self.config.slide_width_px > 0:
+                 ppt_img_frac_of_slide = element.display_width_px / self.config.slide_width_px
+                 center_img_width_frac = min(max(0.2, ppt_img_frac_of_slide), 0.85) # Cap 20%-85% for centered
+            includegraphics_opts_str = f"width={center_img_width_frac:.2f}\\textwidth,keepaspectratio"
+
+
+        if wrapfig_char_placement and (effective_position_hint == "left" or effective_position_hint == "right"):
+            self.write(f'\\begin{{wrapfigure}}{{{wrapfig_char_placement}}}{{{wf_width_frac:.2f}\\linewidth}}\n')
+            self.write(r'  \centering' + '\n') 
+            self.write(f'  \\includegraphics[{includegraphics_opts_str}]{{{image_path_latex}}}\n')
+            if caption_text: # Though you requested no captions, keeping the if block
+                self.write(f'  \\caption{{{caption_text}}}\n')
+            self.write(r'\end{wrapfigure}' + '\n')
         else:
-            self.write(f'\\includegraphics{{{quoted_path}}}\n')
-        self.write(r'\end{center}' + '\n\n')
-        # TODO: Captions for figures using \captionof{figure} or similar if not in a figure env.
-
+            self.write(r'\begin{figure}' + '\n')
+            self.write(r'  \centering' + '\n')
+            self.write(f'  \\includegraphics[{includegraphics_opts_str}]{{{image_path_latex}}}\n')
+            if caption_text:
+                self.write(f'  \\caption{{{caption_text}}}\n')
+            self.write(r'\end{figure}' + '\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
         # Corrected: Use verbatim for LaTeX
@@ -1721,47 +1783,6 @@ class BeamerFormatter(Formatter):
 
     def get_strong(self, text):
         return self._format_text_with_delimiters(text, r'\textbf{', '}')
-
-    def get_inline_math(self, text: str) -> str:
-        # Formatter's get_inline_math logic should handle $ delimiters correctly.
-        # Here, we just ensure the text passed to it is LaTeX-safe if it's not math.
-        # However, get_formatted_runs calls this with raw text for a math run.
-        
-        # This re-implementation is for LaTeX context
-        if not text:
-            return text
-
-        leading_whitespace = ""
-        trailing_whitespace = ""
-        core_text = text
-        # ... (whitespace stripping logic from base Formatter.get_inline_math) ...
-        # For brevity, assuming core_text is extracted:
-        # Find leading whitespace
-        for i, char_val in enumerate(text):
-            if not char_val.isspace():
-                leading_whitespace = text[:i]
-                core_text = text[i:]
-                break
-        else: return text
-        # Find trailing whitespace
-        for i in range(len(core_text) - 1, -1, -1):
-            if not core_text[i].isspace():
-                trailing_whitespace = core_text[i+1:]
-                core_text = core_text[:i+1]
-                break
-        if not core_text: return text
-
-
-        # If core_text is already $...$ (but not $$...$$), use it.
-        # Otherwise, wrap with $.
-        if (core_text.startswith('$') and core_text.endswith('$') and
-            not (core_text.startswith('$$') and core_text.endswith('$$'))):
-            final_math_part = core_text
-        else:
-            final_math_part = f"${core_text}$"
-            
-        return f"{leading_whitespace}{final_math_part}{trailing_whitespace}"
-
 
     def get_colored(self, text, rgb):
         # Convert RGB to 0-1 scale for xcolor if needed, or use rbg model
@@ -1808,8 +1829,17 @@ class BeamerFormatter(Formatter):
         return self.esc_re.sub(lambda m: self.esc_repl(m, verbatim_like, is_url), text)
 
     def put_list_header(self):
-        # Assuming simple itemize for now. Could be enumerate or more complex.
-        self.write(r'\begin{itemize}' + '\n')
+        # This is called by the base Formatter's output loop when a list sequence starts.
+        # With the new put_list logic, this can be a no-op, as put_list will handle
+        # opening the necessary environments based on self.current_list_level.
+        pass
 
     def put_list_footer(self):
-        self.write(r'\end{itemize}' + '\n')
+        # This is called by the base Formatter's output loop when a list sequence ends.
+        # Close any remaining open itemize environments.
+        while self.current_list_level > 0:
+            self.current_list_level -= 1
+            indent_str = '  ' * self.current_list_level
+            self.write(indent_str + r'\end{itemize}' + '\n')
+        # Ensure current_list_level is reset to 0, indicating no list is active.
+        self.current_list_level = 0

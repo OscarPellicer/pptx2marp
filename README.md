@@ -1,14 +1,19 @@
-# PPTX2MARP
+# PPTX2MARP (& PPTX2BEAMER)
 
-This is a fork of the `pptx2md` project, primarily focused on converting PowerPoint pptx files into Marp markdown. Key enhancements and differences from the original `pptx2md` include:
+This is a fork of the `pptx2md` project, primarily focused on converting PowerPoint pptx files into Marp markdown, and now also LaTeX Beamer. Key enhancements and differences from the original `pptx2md` include:
 
 - **Marp Output:** Dedicated `--marp` output mode with specific features:
     - Automatic multi-column layout heuristics for Marp slides.
-    - Included CSS for manual figure captions.
-    - Optimized image handling for Marp, including working size preservation.
-- **Mathematical Formula Parsing:** Conversion of PowerPoint equations into LaTeX, for display in Marp slides as `$...$` or `$$...$$`, depending on the context.
+    - Automatic font scaling classes for slides (`small`, `smaller`, `smallest`) based on content density.
+    - Included CSS for manual figure captions and absolute positioning.
+    - Optimized image handling for Marp, including working size preservation and positioning hints (`left`, `center`, `right`).
+- **LaTeX Beamer Output:** Dedicated `--beamer` output mode:
+    - Automatic font scaling for slides (`small`, `footnotesize`, `scriptsize`) based on content density.
+    - Heuristic two-column layout for dense slides.
+    - Uses standard LaTeX packages: `booktabs` for tables, `graphicx` for images (scaled and positioned), `verbatim` for code blocks, `amsmath`/`amssymb` for math, `xcolor` for colors, `hyperref` for links, and `wrapfig` for text wrapping around images.
+- **Mathematical Formula Parsing:** Conversion of PowerPoint equations into LaTeX, for display in Marp slides (`$...$` or `$$...$$`) and Beamer (inline `$...$` or display `\[...\]`).
 - **Enhanced Code Formatting:** Improved detection and conversion for `inline code` and fenced code blocks (three backticks).
-- **Image Processing Refinements:** Includes fixes and improvements to image crop functionality and image conversion to PNG for unsupported image formats (e.g. wmf, tiff, etc.).
+- **Image Processing Refinements:** Includes fixes and improvements to image crop functionality and image conversion to PNG for unsupported image formats (e.g. wmf, tiff, etc.). Image positioning hints based on location heuristics (left/center/right alignment) are used by Marp and Beamer formatters to position images.
 
 Right now the main functionality is working quite well, but there are some smaller problems left to be fixed, such as PowerPoint graphs not being converted to images.
 
@@ -31,6 +36,7 @@ A tool to convert Powerpoint pptx file into markdown.
 * `code` using monospaced fonts.
 * Code blocks, where text boxes primarily styled with monospaced fonts are converted.
 * Top-to-bottom then left-to-right block order.
+* Notes from the presenter.
 
 **Supported output:**
 
@@ -38,8 +44,8 @@ A tool to convert Powerpoint pptx file into markdown.
 * [Tiddlywiki](https://tiddlywiki.com/)'s wikitext
 * [Madoko](https://www.madoko.net/)
 * [Quarto](https://quarto.org/)
-* [Marp](https://marp.app/) (with automatic multi-column heuristics and CSS for manual figure captions)
-* LaTeX Beamer
+* [Marp](https://marp.app/) (with many extra features, see above)
+* [LaTeX Beamer](https://ctan.org/pkg/beamer) (with many extra features, see above)
 
 _Please star this repo if you like it!_
 
@@ -112,13 +118,18 @@ Use it with `pptx2md [filename] -t titles.txt`.
 * `--wiki` / `--mdk` if you happen to be using tiddlywiki or madoko, this argument outputs the corresponding markup language
 * `--qmd` outputs to the qmd markup language used for [quarto](https://quarto.org/docs/presentations/revealjs/) powered presentations
 * `--marp` outputs to the Marp markdown language for slide presentations.
-  * **Automatic Two-Column Layout:** For slides classified as `smaller` or `smallest` (based on content length), if the average line length of list items and paragraphs is less than 40 characters, the content (excluding the main title, if any) will be automatically split into two columns. The slide's class will also be adjusted to `small`.
-  * **Manual Figure Captions:** The generated Marp CSS includes styles for manually creating figures with captions. You can wrap an `<img>` tag and its caption (e.g., `<p class="figcaption">Your caption</p>` or `<em>Your caption</em>`) in a `<div class="figure-container">`. Add `align-left`, `align-right`, or `align-center` classes to the container for positioning. Examples are provided as comments in the generated CSS block of your `.md` file.
+  * **Automatic Two-Column Layout:** For slides classified as `smaller` or `smallest` (based on content length), if the average line length of list items and paragraphs is less than 40 characters, the content (excluding the main title, if any) will be automatically split into two columns using Marp's grid layout. The slide's class will also be adjusted to `small`.
+  * **Image Handling:** Images are scaled to fit Marp's default 720p resolution (1280px width). Positional hints (left, center, right) derived from the image's placement in PowerPoint are translated into Marp's image syntax (e.g., `![left w:300px](image.png)`).
+  * **Manual Figure Captions & Positioning:** The generated Marp CSS includes styles for manually creating figures with captions and for absolute positioning of elements. Examples are provided as comments in the generated CSS block of your `.md` file.
 * `--beamer` outputs a LaTeX Beamer (`.tex`) file.
-  * **Automatic Font Scaling:** Font size for the entire slide can be automatically adjusted (`small`, `footnotesize`, `scriptsize`) based on content density.
-  * **Automatic Two-Column Layout:** Similar to Marp, dense slides with short lines may be heuristically split into two Beamer columns.
-  * **LaTeX Features:** Uses `booktabs` for tables, `graphicx` for images (scaled relative to `\textwidth`), `verbatim` for code blocks, and standard LaTeX for mathematical formulas.
-  * **Beamer Configuration:** Generates a standard Beamer document with navigation symbols disabled and no automatic title page by default. The preamble includes common packages like `xcolor`, `hyperref`, `amsmath`, `amssymb`.
+  * **Automatic Font Scaling:** Font size for the entire slide content (after the title) can be automatically adjusted (`\small`, `\footnotesize`, `\scriptsize`) based on overall content density.
+  * **Automatic Two-Column Layout:** Dense slides with short lines (not originally multi-column slides from PPTX) may be heuristically split into two Beamer columns (`\begin{columns}...\end{columns}`). Original multi-column structures from PPTX are also preserved.
+  * **Image Handling:** Images are placed using `figure` or `wrapfig` environments.
+    * **Centering:** Images not hinted as left/right are centered using `\begin{figure}\centering...\end{figure}`. Their width is scaled proportionally to `\textwidth` based on their original size relative to the PowerPoint slide width.
+    * **Floating/Wrapping:** Images heuristically determined to be on the left or right (and not too wide) are placed using the `wrapfig` package (`\begin{wrapfigure}{l/r}{width}...\end{wrapfigure}`), allowing text to flow around them. The width of the `wrapfig` environment is determined based on the image's original proportion of the slide width.
+    * Captions are not automatically generated for images in Beamer.
+  * **LaTeX Features:** Uses `booktabs` for tables, `graphicx` for images, `verbatim` for code blocks, `amsmath` and `amssymb` for mathematical formulas, `xcolor` for text colors, and `hyperref` for links. Nested lists are correctly generated using nested `itemize` environments.
+  * **Beamer Configuration:** Generates a standard Beamer document with `aspectratio=169`, navigation symbols disabled (`\beamertemplatenavigationsymbolsempty`), and no automatic `\maketitle` by default. The preamble includes common packages.
 * `--page [number]` only convert the specified page
 * `--keep-similar-titles` keep similar titles and add "(cont.)" to repeated slide titles
 
