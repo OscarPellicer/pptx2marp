@@ -1474,7 +1474,7 @@ class BeamerFormatter(Formatter):
 \usepackage{amsmath}  % For math
 \usepackage{amssymb}  % For math symbols
 \usepackage{wrapfig}  % For text wrapping around figures
-% \usepackage{listings} % For code blocks (optional, more advanced)
+\usepackage{listings} % For code blocks (optional, more advanced)
 % \usepackage{minted} % For code blocks (optional, powerful, needs shell-escape)
 
 % Beamer settings
@@ -1628,17 +1628,6 @@ class BeamerFormatter(Formatter):
         self.write(r'\end{document}' + '\n')
         self.close()
 
-    def close(self):
-        raw_output = self._buffer.getvalue()
-        sanitized_output = raw_output.replace('\v', ' ') 
-        self.ofile.write(sanitized_output)
-        # Call super().close() from the original base Formatter if it did more than just closing ofile
-        # The new Formatter.close() handles buffer and ofile.
-        if self.ofile: # Ensure file is closed
-            self.ofile.close()
-            self.ofile = None # type: ignore
-
-
     def put_title(self, text: str, level: int):
         # For titles within a frame (e.g., if not the frametitle)
         # text is already escaped and formatted by get_formatted_runs
@@ -1746,19 +1735,8 @@ class BeamerFormatter(Formatter):
             self.write(r'\end{figure}' + '\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
-        # Corrected: Use verbatim for LaTeX
-        # language parameter is not directly used by basic verbatim.
-        # For listings/minted, it would be:
-        # lang_opt = f'[language={language}]' if language and self.config.use_listings else ''
-        # self.write(f'\\begin{{lstlisting}}{lang_opt}\n{self.get_escaped(code.strip(), verbatim_like=True)}\n\\end{{lstlisting}}\n\n')
-        
-        # Basic verbatim:
-        # Code inside verbatim should generally not be escaped by our esc_map,
-        # as verbatim handles most special characters itself.
-        # However, be careful with the \end{verbatim} string appearing in the code.
-        self.write(r'\begin{verbatim}' + '\n')
-        self.write(code.strip() + '\n') # Pass raw code to verbatim
-        self.write(r'\end{verbatim}' + '\n\n')
+        lang_opt = f'[language={language}]' if language and self.config.use_listings else ''
+        self.write(f'\\begin{{lstlisting}}{lang_opt}\n{self.get_escaped(code.strip(), verbatim_like=True)}\n\\end{{lstlisting}}\n\n')
 
     def put_formula(self, element: FormulaElement):
         content = element.content.strip()
