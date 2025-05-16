@@ -498,6 +498,13 @@ html: true
         lang_tag = language if language else ""
         self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n') # Writes directly
 
+    def get_inline_code(self, text: str) -> str:
+        # First, escape Marp-specific characters within the code text itself.
+        # This handles `|` -> `\|`, `*` -> `\*`, `` ` `` -> `\``, etc.
+        escaped_text = self.get_escaped(text)
+        # Then, wrap the Marp-escaped text in single backticks for inline code.
+        return f'`{escaped_text}`'
+
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, '*', '*')
 
@@ -515,6 +522,10 @@ html: true
         return '\\' + match.group(0)
 
     def get_escaped(self, text):
+        if self.config.disable_escaping:
+            return text
+        # Replace problematic Unicode characters first
+        text = text.replace('\u000B', ' ').replace('\u000C', ' ')
         text = re.sub(self.esc_re1, self.esc_repl, text)
         text = re.sub(self.esc_re2, self.esc_repl, text)
         return text

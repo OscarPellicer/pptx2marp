@@ -1,3 +1,4 @@
+# Modified by Oscar Pellicer, 2025
 # Copyright 2024 Liu Siyao
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -814,15 +815,16 @@ def parse(config: ConversionConfig, prs: Presentation) -> ParsedPresentation:
             except:
                 logger.warning('failed to print all bad shapes.')
 
-        if not config.try_multi_column:
+        if True: #not config.try_multi_column:
             result_slide = GeneralSlide(elements=process_shapes(config, shapes, idx + 1))
-        else:
-            multi_column_slide = get_multi_column_slide_if_present(
-                prs, slide, partial(process_shapes, config=config, slide_id=idx + 1))
-            if multi_column_slide:
-                result_slide = multi_column_slide
-            else:
-                result_slide = GeneralSlide(elements=process_shapes(config, shapes, idx + 1))
+        # else:
+        #     logger.warning(f'Processing multi-column slide has not been tested in pptx2marp')
+        #     multi_column_slide = get_multi_column_slide_if_present(
+        #         prs, slide, partial(process_shapes, config=config, slide_id=idx + 1))
+        #     if multi_column_slide:
+        #         result_slide = multi_column_slide
+        #     else:
+        #         result_slide = GeneralSlide(elements=process_shapes(config, shapes, idx + 1))
 
         if not config.disable_notes and slide.has_notes_slide:
             text = slide.notes_slide.notes_text_frame.text

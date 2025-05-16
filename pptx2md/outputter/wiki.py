@@ -24,8 +24,7 @@ class WikiFormatter(Formatter):
     # write outputs to wikitext
     def __init__(self, config):
         super().__init__(config)
-        self.esc_re = re.compile(r'<([^>]+)>_FIX_ME_WIKI_ESCAPING_<') # Placeholder, review wiki escaping needs
-        # Original was: self.esc_re = re.compile(r'<([^>]+)>')
+        self.esc_re = re.compile(r'<([^>]+)>')
         # This regex seems to target HTML tags for escaping. 
         # Wiki escaping is usually about characters like [, ], |, =, etc.
         # For now, I will use a more common wiki char escaping approach.
@@ -41,7 +40,9 @@ class WikiFormatter(Formatter):
             "'": '&#39;', # For 'strong' and 'accent'
             '<': '&lt;',
             '>': '&gt;',
-            '&': '&amp;'
+            '&': '&amp;',
+            '\u000B': ' ',  # Vertical Tab
+            '\u000C': ' '   # Form Feed
         }
         self.wiki_esc_re = re.compile('|'.join(re.escape(key) for key in self.wiki_esc_map.keys()))
 

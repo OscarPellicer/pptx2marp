@@ -264,7 +264,7 @@ class BeamerFormatter(Formatter):
             self.write(f'\\textit{{{text}}}\\par\n\n')
 
     def put_list(self, text: str, level: int):
-        MAX_LATEX_LIST_LEVEL = 4 # Standard LaTeX/Beamer itemize depth is 4 levels
+        MAX_LATEX_LIST_LEVEL = 3 # Standard LaTeX/Beamer itemize depth is 3 levels
 
         # input `level` is 0-indexed from parser.
         # Clamp the effective level for LaTeX generation to avoid exceeding MAX_LATEX_LIST_LEVEL.
@@ -358,55 +358,48 @@ class BeamerFormatter(Formatter):
         self.write(r'\end{table}' + '\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
-        processed_code = code.strip('\n') # Strip leading/trailing newlines only
-        lang_opt = f',language={language}' if language and getattr(self.config, 'use_listings', False) else ''
+        lines = code.splitlines() # Split into a list of lines
+        if not lines and code.strip() == "": # Handle truly empty or whitespace-only code block gracefully
+            # If the original code was just whitespace, it might result in empty `lines`
+            # but we might still want a visual indication of an attempted code block, e.g., a small space.
+            # For now, let's just ensure a paragraph break if it was meant to be a block.
+            # If there were no lines at all (empty string input), this will also do nothing if write buffer is empty.
+            self.write('\n') 
+            return
         
-        if lang_opt: 
-            # lstlisting handles most content well; avoid get_escaped.
-            self.write(f'\\begin{{lstlisting}}[basicstyle=\\ttfamily\footnotesize{lang_opt}]\n{processed_code}\n\\end{{lstlisting}}\n\n')
-        else:
-            # verbatim environment prints content as is.
-            self.write(f'\\begin{{verbatim}}\n{processed_code}\n\\end{{verbatim}}\n\n')
+        # Ensure there's some vertical separation before the code block if it's not the first element.
+        # self.write('\medskip\noindent') # Optional: add some space and prevent indentation
+
+        for line in lines:
+            # self.get_inline_code handles escaping for \texttt and wraps it.
+            texttt_line = self.get_inline_code(line.rstrip('\r')) # rstrip to remove potential \r from \r\n
+            # Using \par for a paragraph break after each line.
+            # Add an explicit newline in the .tex source for readability.
+            self.write(f'{texttt_line}\par\n')
+        
+        # Ensure separation after the block too, if desired.
+        # self.write('\medskip\n')
 
     def put_formula(self, element: FormulaElement):
         content = element.content.strip()
+        
+        # Replace newlines within the formula content with LaTeX math newlines ' \\ '.
+        # The added spaces around \\ are for robustness, and a newline afterwards in the source for readability.
+        processed_formula_text = content.replace('\n', ' \\\\ ')
+
         if content.startswith('$$') and content.endswith('$$'):
-            math_content = content[2:-2].strip()
-            self.write(f'\\[\n{math_content}\n\\]\n\n')
+            # Original content had $$, we extract the inner part for \[\]
+            math_content_inner = content[2:-2].strip()
+            processed_math_content_inner = math_content_inner.replace('\n', ' \\\\ ')
+            self.write(f'\\[\n{processed_math_content_inner}\n\\]\n\n')
         elif content.startswith('$') and content.endswith('$'):
-            self.write(f'{content}\n\n') # Output $...$ math directly
+            # For inline math $...$, replace internal newlines and write as is.
+            # It's unusual for inline math to have newlines, but handle defensively.
+            self.write(f'{processed_formula_text}\n\n') 
         else:
-            # Assume content is display math needing \[ ... \]
-            self.write(f'\\[\n{content}\n\\]\n\n')
-
-    def get_formatted_runs(self, runs: List[TextRun]) -> str:
-        result_parts = []
-        for run in runs:
-            current_run_text = run.text if run.text is not None else "" # Ensure text is not None
-            
-            is_math_style = getattr(run.style, 'is_math', False)
-            
-            processed_text = ""
-            is_run_code_style = getattr(run.style, 'is_code', False)
-
-            if is_math_style:
-                processed_text = current_run_text # Math text is used directly
-            elif is_run_code_style:
-                processed_text = self.get_inline_code(current_run_text)
-            else:
-                processed_text = self.get_escaped(current_run_text)
-
-            if run.style.is_strong:
-                processed_text = self.get_strong(processed_text)
-            if run.style.is_accent:
-                processed_text = self.get_accent(processed_text)
-            if run.style.color_rgb:
-                processed_text = self.get_colored(processed_text, run.style.color_rgb)
-            if run.style.hyperlink:
-                processed_text = self.get_hyperlink(processed_text, run.style.hyperlink)
-            
-            result_parts.append(processed_text)
-        return "".join(result_parts)
+            # Assume content is display math needing \[ ... \] but without $$ delimiters originally.
+            # Use the processed_formula_text which has newlines replaced.
+            self.write(f'\\[\n{processed_formula_text}\n\\]\n\n')
 
     def get_inline_code(self, text: str) -> str:
         return r'\texttt{' + self.get_escaped(text, verbatim_like=True) + r'}'
@@ -430,10 +423,16 @@ class BeamerFormatter(Formatter):
     def esc_repl(self, match, verbatim_like=False, is_url=False):
         char = match.group(0)
         if verbatim_like:
+            # For \texttt{} and similar contexts:
+            # \, {, } need specific escapes.
+            # Other special characters from esc_map (like |, _, $, %) also need escaping.
+            if char == '\\': return r'\textbackslash{}'
             if char == '{': return r'\{'
             if char == '}': return r'\}'
-            if char == '\\': return r'\textbackslash{}' # Keep for verbatim
-            return char
+            # Fall through to the main escape map for other characters.
+            # This ensures robust escaping for _ , ^, &, %, $, #, and crucially | -> \textbar{}
+            return self.esc_map.get(char, char)
+
         if is_url:
             # For URLs/paths, common problematic characters need escaping for LaTeX.
             # Backslash should NOT become \textbackslash{}. It's converted to / before this.

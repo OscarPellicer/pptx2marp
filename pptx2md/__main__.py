@@ -1,3 +1,4 @@
+# Modified by Oscar Pellicer, 2025
 # Copyright 2024 Liu Siyao
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,9 +28,9 @@ logger = logging.getLogger(__name__)
 def parse_args() -> ConversionConfig:
     arg_parser = argparse.ArgumentParser(description='Convert pptx to markdown')
     arg_parser.add_argument('pptx_path', type=Path, help='Path to the pptx file to be converted')
+    arg_parser.add_argument('-o', '--output-dir', type=Path, default='outputs', help='Output directory. Default: {default}')
+    arg_parser.add_argument('-i', '--image-dir', type=Path, default=None, help='Directory to put images extracted')
     arg_parser.add_argument('-t', '--title', type=Path, help='Path to the custom title list file')
-    arg_parser.add_argument('-o', '--output', type=Path, help='Output directory')
-    arg_parser.add_argument('-i', '--image-dir', type=Path, help='Directory to put images extracted')
     arg_parser.add_argument('--image-width', type=int, help='Maximum image width in px')
     arg_parser.add_argument('--disable-image', action="store_true", help='Disable image extraction')
     arg_parser.add_argument('--disable-wmf',
@@ -51,7 +52,7 @@ def parse_args() -> ConversionConfig:
     arg_parser.add_argument('--json', action="store_true", help='Generate output as the raw .pptx abstract syntax tree in JSON format')
     arg_parser.add_argument('--min-block-size',
                             type=int,
-                            default=15,
+                            default=0,
                             help='Minimum character number of a text block to be converted')
     arg_parser.add_argument("--page", type=int, default=None, help="Only convert the specified page")
     arg_parser.add_argument(
@@ -71,8 +72,8 @@ def parse_args() -> ConversionConfig:
     return ConversionConfig(
         pptx_path=args.pptx_path,
         output_path=None, #This will be automatically set in entry.py
-        output_dir=args.output,
-        image_dir=args.image_dir or args.output.parent / 'img',
+        output_dir=args.output_dir,
+        image_dir=args.image_dir or args.output_dir / 'img',
         title_path=args.title,
         image_width=args.image_width,
         disable_image=args.disable_image,

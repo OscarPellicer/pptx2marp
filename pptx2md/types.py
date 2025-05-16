@@ -86,7 +86,7 @@ class ConversionConfig:
     is_json: bool = False
     """Generate output as the raw .pptx abstract syntax tree in JSON format"""
 
-    min_block_size: int = 5
+    min_block_size: int = 0
     """The minimum character number of a text block to be converted"""
 
     page: Optional[int] = None

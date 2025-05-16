@@ -202,6 +202,8 @@ format:
     def get_escaped(self, text):
         if self.config.disable_escaping:
             return text
+        # Replace problematic Unicode characters first
+        text = text.replace('\u000B', ' ').replace('\u000C', ' ')
         text = re.sub(self.esc_re1, self.esc_repl, text)
         text = re.sub(self.esc_re2, self.esc_repl, text)
         return text 
