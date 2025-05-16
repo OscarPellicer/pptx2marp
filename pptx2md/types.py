@@ -27,10 +27,13 @@ class ConversionConfig:
     """Configuration for PowerPoint to Markdown conversion."""
 
     pptx_path: Path
-    """Path to the pptx file to be converted"""
+    """Path to the .pptx file to be converted"""
 
     output_path: Path
     """Path of the output file"""
+
+    output_dir: Path
+    """Where to put the output file(s)"""
 
     image_dir: Optional[Path]
     """Where to put images extracted"""
@@ -62,6 +65,9 @@ class ConversionConfig:
     enable_slides: bool = False
     """Deliniate slides with `\n---\n`"""
 
+    is_md: bool = False
+    """Generate output as standard markdown"""
+
     is_wiki: bool = False
     """Generate output as wikitext (TiddlyWiki)"""
 
@@ -77,7 +83,10 @@ class ConversionConfig:
     is_beamer: bool = False
     """Generate output as beamer tex"""
 
-    min_block_size: int = 15
+    is_json: bool = False
+    """Generate output as the raw .pptx abstract syntax tree in JSON format"""
+
+    min_block_size: int = 5
     """The minimum character number of a text block to be converted"""
 
     page: Optional[int] = None
@@ -101,7 +110,11 @@ class ConversionConfig:
     apply_cropping_in_parser: bool = True
     """Apply cropping directly in the parser, modifying the saved image."""
 
+    disable_captions: bool = True
+    """Disable captions"""
 
+    disable_image_wrapping: bool = False
+    """Disable image wrapping"""
 class ElementType(str, Enum):
     Title = "Title"
     ListItem = "ListItem"
@@ -123,6 +136,7 @@ class TextStyle(BaseModel):
 class TextRun(BaseModel):
     text: str
     style: TextStyle
+    font_name: Optional[str] = None
 
 
 class Position(BaseModel):

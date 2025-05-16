@@ -358,6 +358,12 @@ class Formatter:
             output_segments.append(self._format_single_merged_run(current_merged_text, current_style))
             
         final_text = "".join(output_segments)
+        # Removed .strip() from here to allow precise whitespace control by formatters if needed at paragraph level.
+        # Individual formatters can strip if they desire.
+        # However, for get_formatted_runs which is about content *within* an element,
+        # stripping the final combined string is often desirable to avoid leading/trailing spaces
+        # from the combination process itself, unless specifically intended.
+        # Let's keep strip() for now, as it's generally safer for run concatenation.
         return final_text.strip()
 
     def put_para(self, text):
@@ -366,16 +372,26 @@ class Formatter:
     def put_image(self, path, max_width):
         pass
 
-    def put_table(self, table):
-        pass
+    def put_table(self, table: List[List[str]]): # table cells are already formatted strings
+        if not table or not table[0]:
+            return # Handle empty table
+        
+        gen_table_row = lambda row: '| ' + ' | '.join([
+            c.replace('\n', '<br />') if '`' not in c else c.replace('\n', ' ') 
+            for c in row
+        ]) + ' |'
+        
+        self.write(gen_table_row(table[0]) + '\n') 
+        self.write(gen_table_row([':-' for _ in table[0]]) + '\n') 
+        self.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def put_formula(self, element: FormulaElement):
         formatted_content = self._format_text_with_delimiters(element.content, "$$", "$$")
-        self.ofile.write(f'{formatted_content}\n\n')
+        self.write(f'{formatted_content}\n\n')
 
     def get_inline_code(self, text: str) -> str:
         """Formats text as inline code. Does not strip or escape input text.
@@ -502,6 +518,7 @@ class Formatter:
         
         if self.ofile:
             self.ofile.close()
+            self.ofile = None # type: ignore
 
 
 class MarkdownFormatter(Formatter):
@@ -512,29 +529,33 @@ class MarkdownFormatter(Formatter):
         self.esc_re2 = re.compile(r'(<[^>]+>)')
 
     def put_title(self, text, level):
-        self.ofile.write('#' * level + ' ' + text + '\n\n')
+        self.write('#' * level + ' ' + text + '\n\n')
 
     def put_list(self, text, level):
-        self.ofile.write('  ' * level + '* ' + text.strip() + '\n')
+        self.write('  ' * level + '* ' + text.strip() + '\n')
 
     def put_para(self, text):
-        self.ofile.write(text + '\n\n')
+        self.write(text + '\n\n')
 
     def put_image(self, path, max_width=None):
         if max_width is None:
-            self.ofile.write(f'![]({urllib.parse.quote(path)})\n\n')
+            self.write(f'![]({urllib.parse.quote(path)})\n\n')
         else:
-            self.ofile.write(f'<img src="{path}" style="max-width:{max_width}px;" />\n\n')
+            self.write(f'<img src="{path}" style="max-width:{max_width}px;" />\n\n')
 
-    def put_table(self, table):
-        gen_table_row = lambda row: '| ' + ' | '.join([c.replace('\n', '<br />') for c in row]) + ' |'
-        self.ofile.write(gen_table_row(table[0]) + '\n')
-        self.ofile.write(gen_table_row([':-:' for _ in table[0]]) + '\n')
-        self.ofile.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
+    def put_table(self, table: List[List[str]]):
+        if not table or not table[0]: return
+        gen_table_row = lambda row: '| ' + ' | '.join([
+            c.replace('\n', '<br />') if '`' not in c else c.replace('\n', ' ')
+            for c in row
+        ]) + ' |'
+        self.write(gen_table_row(table[0]) + '\n')
+        self.write(gen_table_row([':-:' for _ in table[0]]) + '\n') # Centered for Markdown
+        self.write('\n'.join([gen_table_row(row) for row in table[1:]]) + '\n\n')
 
     def put_code_block(self, code: str, language: Optional[str]):
         lang_tag = language if language else ""
-        self.ofile.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
+        self.write(f'```{lang_tag}\n{code.strip()}\n```\n\n')
 
     def get_accent(self, text):
         return self._format_text_with_delimiters(text, '_', '_')
@@ -1660,6 +1681,23 @@ class BeamerFormatter(Formatter):
         # Indentation for the \item itself is based on the original 0-indexed level
         item_indent_str = '  ' * level 
         self.write(item_indent_str + r'\item ' + text.strip() + '\n')
+
+    def put_list_header(self):
+        # This is called by the base Formatter's output loop when a list sequence starts.
+        # With the new put_list logic, this can be a no-op, as put_list will handle
+        # opening the necessary environments based on self.current_list_level.
+        pass
+
+    def put_list_footer(self):
+        # This is called by the base Formatter's output loop when a list sequence ends.
+        # Close any remaining open itemize environments.
+        while self.current_list_level > 0:
+            self.current_list_level -= 1
+            indent_str = '  ' * self.current_list_level
+            self.write(indent_str + r'\end{itemize}' + '\n')
+        # Ensure current_list_level is reset to 0, indicating no list is active.
+        self.current_list_level = 0
+
 
     def put_para(self, text: str):
         # text is already escaped and formatted by get_formatted_runs

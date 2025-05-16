@@ -29,6 +29,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from rapidfuzz import process as fuze_process
 from tqdm import tqdm
 from pptx.util import Emu # For EMU to Px conversion
+from pptx.shapes.picture import Picture # Added for type hinting
 
 from pptx2md.multi_column import get_multi_column_slide_if_present
 from pptx2md.types import (
@@ -116,7 +117,9 @@ def is_strong(font):
 def get_text_runs(para) -> List[TextRun]:
     runs = []
     for run in para.runs:
-        result = TextRun(text=run.text, style=TextStyle())
+        # Populate font_name directly in TextRun
+        font_name = run.font.name if run.font and hasattr(run.font, 'name') else None
+        result = TextRun(text=run.text, style=TextStyle(), font_name=font_name)
         if result.text == '':
             continue
         try:
@@ -469,33 +472,68 @@ def _open_and_prepare_image_with_pillow(
 
 
 def _save_image_and_get_path(
-    image_blob_to_save: bytes,
-    config: ConversionConfig,
-    pic_ext_for_filename: str, # The extension to use for the saved file (e.g., 'png' after conversion)
-    current_picture_idx: int
+    config: 'ConversionConfig',
+    image_blob: bytes,
+    image_final_ext: str,
+    original_shape_id_for_naming: Union[str, int],
+    slide_id: int
 ) -> str:
-    """Saves the image blob to a file and returns its relative path for markdown."""
-    file_prefix = ''.join(os.path.basename(config.pptx_path).split('.')[:-1])
-    pic_name_for_save = file_prefix + f'_{current_picture_idx}'
-    
-    img_dir_path_obj = Path(config.image_dir)
-    if not img_dir_path_obj.exists():
-        img_dir_path_obj.mkdir(parents=True, exist_ok=True)
-    
-    output_path_obj = img_dir_path_obj / f'{pic_name_for_save}.{pic_ext_for_filename}'
+    """
+    Saves an image (using the provided blob and extension) and returns its relative path.
+    The image is saved to a subdirectory, structured as:
+    <actual_images_base_dir>/<config.pptx_path.stem>_img/<generated_filename>
+    The returned path is relative to actual_images_base_dir.
+    It attempts to derive actual_images_base_dir correctly if config.output_dir seems to be a file path.
+    """
+    if not config.output_dir:
+        raise ValueError("config.output_dir must be set to save images.")
 
-    with open(output_path_obj, 'wb') as f:
-        f.write(image_blob_to_save)
-
-    config_output_path_obj = Path(config.output_path)
-    try:
-        base_for_relpath = config_output_path_obj.parent 
-        img_outputter_path = os.path.relpath(output_path_obj, base_for_relpath)
-    except ValueError: 
-        # This can happen if output_path_obj and base_for_relpath are on different drives on Windows
-        img_outputter_path = str(output_path_obj.resolve())
+    actual_images_base_dir = config.output_dir
+    # Attempt to determine the correct base directory for images
+    # if config.output_dir appears to be a full file path.
+    if not config.output_dir.is_dir():
+        if config.output_dir.suffix:  # Has a file-like extension (e.g., .md)
+            logger.info(
+                f"config.output_dir ('{config.output_dir}') appears to be a full file path. "
+                f"Using its parent directory ('{config.output_dir.parent}') as the base for the images folder."
+            )
+            actual_images_base_dir = config.output_dir.parent
+        else:
+            # Not a directory and no suffix, could be problematic.
+            logger.warning(
+                f"config.output_dir ('{config.output_dir}') is not recognized as a directory and lacks a file extension. "
+                f"Attempting to use it as the base for the images folder. This may fail."
+            )
     
-    return str(img_outputter_path).replace('\\', '/')
+    # Ensure the determined base directory for images (e.g., "outputs/") exists.
+    actual_images_base_dir.mkdir(parents=True, exist_ok=True)
+
+    if not config.pptx_path or not config.pptx_path.stem:
+        raise ValueError("config.pptx_path.stem must be available for naming the image subfolder.")
+
+    # New image subfolder name: <config.pptx_path.stem>_img
+    image_subfolder_name = f"{config.pptx_path.stem}_img"
+    
+    # Define the specific target directory for this presentation's images
+    # e.g., <actual_images_base_dir>/presentation_name_img/
+    image_target_dir = actual_images_base_dir / image_subfolder_name
+    
+    # Create this specific image directory
+    image_target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename_prefix = f"slide{slide_id}_shape{original_shape_id_for_naming}"
+    filename = f"{filename_prefix}.{image_final_ext}" # Use the final, correct extension
+
+    saved_image_full_path = image_target_dir / filename
+
+    with open(saved_image_full_path, "wb") as f:
+        f.write(image_blob) # Save the processed image blob
+    
+    # Path should be relative to 'actual_images_base_dir'
+    # e.g., if actual_images_base_dir is 'outputs', path is 'presentation_name_img/file.png'
+    relative_path = Path(image_subfolder_name) / filename
+    
+    return str(relative_path)
 
 
 # pil_format_map needs to be accessible by the helper functions if they are top-level
@@ -503,7 +541,7 @@ def _save_image_and_get_path(
 pil_format_map = {'jpg': 'JPEG', 'jpeg': 'JPEG', 'tif': 'TIFF', 'tiff': 'TIFF'}
 
 
-def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageElement, None]:
+def process_picture(config: ConversionConfig, shape: Picture, slide_idx: int) -> Union[ImageElement, None]:
     if config.disable_image:
         return None
 
@@ -519,63 +557,52 @@ def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageEl
     # current_pil_format will be determined after potential WMF/TIFF conversions.
     
     # WMF Conversion
-    # picture_count is used here for a unique temporary WMF filename if conversion occurs.
     current_image_blob, effective_pic_ext, effective_pil_format, converted_from_wmf = \
         _handle_wmf_conversion(current_image_blob, initial_pic_ext, config, slide_idx, picture_count)
 
     # TIFF to PNG Conversion (if not already PNG from WMF)
-    # This operates on the blob and ext potentially modified by WMF conversion.
     if not converted_from_wmf and effective_pic_ext in ['tif', 'tiff']:
         current_image_blob, effective_pic_ext, effective_pil_format = \
             _handle_tiff_conversion(current_image_blob, effective_pic_ext, effective_pil_format, slide_idx)
     
     # Image Cropping and Pillow Processing
     img_to_process_for_crop = None
-    final_blob_w_px, final_blob_h_px = None, None # Dimensions of the blob that will be saved
+    final_blob_w_px, final_blob_h_px = None, None 
     crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element = None, None, None, None
 
-    # Determine if Pillow should skip processing this image (e.g. WMF explicitly disabled)
-    # initial_pic_ext is used here to check original type for disable_wmf logic
     is_wmf_and_disabled = (initial_pic_ext == 'wmf' and config.disable_wmf)
 
     img_to_process_for_crop, initial_blob_w_px, initial_blob_h_px = \
         _open_and_prepare_image_with_pillow(
             current_image_blob, 
-            effective_pic_ext, # The current extension of the blob
-            effective_pil_format, # The current PIL format of the blob
+            effective_pic_ext, 
+            effective_pil_format, 
             slide_idx, 
             shape,
             is_wmf_and_disabled
         )
     
-    final_blob_w_px, final_blob_h_px = initial_blob_w_px, initial_blob_h_px # Start with these
+    final_blob_w_px, final_blob_h_px = initial_blob_w_px, initial_blob_h_px 
 
-    if img_to_process_for_crop: # Pillow opened the image, proceed with potential cropping
+    if img_to_process_for_crop: 
         crop_l_pct = getattr(shape, 'crop_left', 0.0) 
         crop_r_pct = getattr(shape, 'crop_right', 0.0)
         crop_t_pct = getattr(shape, 'crop_top', 0.0)
         crop_b_pct = getattr(shape, 'crop_bottom', 0.0)
 
-        # _crop_image_if_needed takes the Pillow image object and the current blob.
-        # It returns the (potentially) new Pillow object, the (potentially) new blob,
-        # its dimensions, and the crop percentages to store.
         _cropped_img_obj, current_image_blob, \
         (final_blob_w_px, final_blob_h_px), \
         (crop_l_for_element, crop_r_for_element, crop_t_for_element, crop_b_for_element) = \
             _crop_image_if_needed(
                 img_to_process_for_crop, 
                 crop_l_pct, crop_r_pct, crop_t_pct, crop_b_pct,
-                effective_pil_format, # PIL format of the img_to_process_for_crop
-                current_image_blob,   # Blob corresponding to img_to_process_for_crop
+                effective_pil_format, 
+                current_image_blob,   
                 slide_idx,
                 config
             )
-        # current_image_blob is now the (potentially cropped) blob.
-        # final_blob_w_px, final_blob_h_px are dimensions of this current_image_blob.
     
-    elif initial_blob_w_px is not None: # Pillow didn't open, but we got dimensions from shape.image.size
-        # No cropping can be applied by parser if Pillow didn't open it.
-        # If shape has crop attributes, they should be passed through.
+    elif initial_blob_w_px is not None: 
         has_crop_info_on_shape = (getattr(shape, 'crop_left', 0.0) > 0.00001 or
                                   getattr(shape, 'crop_right', 0.0) > 0.00001 or
                                   getattr(shape, 'crop_top', 0.0) > 0.00001 or
@@ -588,12 +615,15 @@ def process_picture(config: ConversionConfig, shape, slide_idx) -> Union[ImageEl
             logger.info(f"Image in slide {slide_idx} (ext: {effective_pic_ext}) could not be opened by Pillow. "
                         f"Crop info from shape will be passed to formatter if present.")
 
-    # Saving the final blob
-    # effective_pic_ext is used for the filename extension (e.g., 'png' if converted)
+    # Saving the final (potentially processed) blob
     saved_path_str = _save_image_and_get_path(
-        current_image_blob, config, effective_pic_ext, picture_count
+        config,
+        current_image_blob,      # Pass the processed blob
+        effective_pic_ext,       # Pass the final extension (e.g., 'png' after conversion)
+        shape.shape_id,          # Pass shape_id for consistent naming
+        slide_idx                # Pass slide_id
     )
-    picture_count += 1 # Increment for the next image
+    picture_count += 1 
 
     # Create ImageElement
     image_data = ImageElement(

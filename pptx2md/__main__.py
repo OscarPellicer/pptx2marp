@@ -26,36 +26,38 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> ConversionConfig:
     arg_parser = argparse.ArgumentParser(description='Convert pptx to markdown')
-    arg_parser.add_argument('pptx_path', type=Path, help='path to the pptx file to be converted')
-    arg_parser.add_argument('-t', '--title', type=Path, help='path to the custom title list file')
-    arg_parser.add_argument('-o', '--output', type=Path, help='path of the output file')
-    arg_parser.add_argument('-i', '--image-dir', type=Path, help='where to put images extracted')
-    arg_parser.add_argument('--image-width', type=int, help='maximum image with in px')
-    arg_parser.add_argument('--disable-image', action="store_true", help='disable image extraction')
+    arg_parser.add_argument('pptx_path', type=Path, help='Path to the pptx file to be converted')
+    arg_parser.add_argument('-t', '--title', type=Path, help='Path to the custom title list file')
+    arg_parser.add_argument('-o', '--output', type=Path, help='Output directory')
+    arg_parser.add_argument('-i', '--image-dir', type=Path, help='Directory to put images extracted')
+    arg_parser.add_argument('--image-width', type=int, help='Maximum image width in px')
+    arg_parser.add_argument('--disable-image', action="store_true", help='Disable image extraction')
     arg_parser.add_argument('--disable-wmf',
                             action="store_true",
-                            help='keep wmf formatted image untouched(avoid exceptions under linux)')
-    arg_parser.add_argument('--disable-color', action="store_true", help='do not add color HTML tags')
+                            help='  Keep wmf formatted image untouched (avoid exceptions under linux)')
+    arg_parser.add_argument('--disable-color', action="store_true", help='Do not add color HTML tags')
     arg_parser.add_argument('--disable-escaping',
                             action="store_true",
-                            help='do not attempt to escape special characters')
-    arg_parser.add_argument('--disable-notes', action="store_true", help='do not add presenter notes')
-    arg_parser.add_argument('--enable-slides', action="store_true", help='deliniate slides `\n---\n`')
-    arg_parser.add_argument('--try-multi-column', action="store_true", help='try to detect multi-column slides')
-    arg_parser.add_argument('--wiki', action="store_true", help='generate output as wikitext(TiddlyWiki)')
-    arg_parser.add_argument('--mdk', action="store_true", help='generate output as madoko markdown')
-    arg_parser.add_argument('--qmd', action="store_true", help='generate output as quarto markdown presentation')
-    arg_parser.add_argument('--marp', action="store_true", help='generate output as marp markdown presentation')
-    arg_parser.add_argument('--beamer', action="store_true", help='generate output as LaTeX Beamer presentation')
+                            help='Do not attempt to escape special characters')
+    arg_parser.add_argument('--disable-notes', action="store_true", help='Do not add presenter notes')
+    arg_parser.add_argument('--enable-slides', action="store_true", help='Deliniate slides `\n---\n`')
+    arg_parser.add_argument('--try-multi-column', action="store_true", help='Try to detect multi-column slides')
+    arg_parser.add_argument('--md', action="store_true", help='Generate output as standard markdown')
+    arg_parser.add_argument('--wiki', action="store_true", help='Generate output as wikitext (TiddlyWiki)')
+    arg_parser.add_argument('--mdk', action="store_true", help='Generate output as madoko markdown')
+    arg_parser.add_argument('--qmd', action="store_true", help='Generate output as quarto markdown presentation')
+    arg_parser.add_argument('--marp', action="store_true", help='Generate output as marp markdown presentation')
+    arg_parser.add_argument('--beamer', action="store_true", help='Generate output as LaTeX Beamer presentation')
+    arg_parser.add_argument('--json', action="store_true", help='Generate output as the raw .pptx abstract syntax tree in JSON format')
     arg_parser.add_argument('--min-block-size',
                             type=int,
                             default=15,
-                            help='the minimum character number of a text block to be converted')
-    arg_parser.add_argument("--page", type=int, default=None, help="only convert the specified page")
+                            help='Minimum character number of a text block to be converted')
+    arg_parser.add_argument("--page", type=int, default=None, help="Only convert the specified page")
     arg_parser.add_argument(
         "--keep-similar-titles",
         action="store_true",
-        help="keep similar titles (allow for repeated slide titles - One or more - Add (cont.) to the title)")
+        help="Keep similar titles (allow for repeated slide titles - One or more - Add (cont.) to the title)")
     arg_parser.add_argument(
         '--disable-parser-cropping',
         action="store_false", 
@@ -66,18 +68,10 @@ def parse_args() -> ConversionConfig:
 
     args = arg_parser.parse_args()
 
-    # Determine output path if not specified
-    if args.output is None:
-        extension = '.tid' if args.wiki else '.qmd' if args.qmd else '.md'
-        if args.marp:
-            extension = '.md'
-        if args.beamer:
-            extension = '.tex'
-        args.output = Path(f'out{extension}')
-
     return ConversionConfig(
         pptx_path=args.pptx_path,
-        output_path=args.output,
+        output_path=None, #This will be automatically set in entry.py
+        output_dir=args.output,
         image_dir=args.image_dir or args.output.parent / 'img',
         title_path=args.title,
         image_width=args.image_width,
@@ -88,11 +82,13 @@ def parse_args() -> ConversionConfig:
         disable_notes=args.disable_notes,
         enable_slides=args.enable_slides,
         try_multi_column=args.try_multi_column,
+        is_md=args.md,
         is_wiki=args.wiki,
         is_mdk=args.mdk,
         is_qmd=args.qmd,
         is_marp=args.marp,
         is_beamer=args.beamer,
+        is_json=args.json,
         min_block_size=args.min_block_size,
         page=args.page,
         keep_similar_titles=args.keep_similar_titles,

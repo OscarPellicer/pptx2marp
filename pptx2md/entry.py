@@ -39,24 +39,31 @@ def convert(config: ConversionConfig):
 
     ast = parse(config, prs)
 
-    if str(config.output_path).endswith('.json'):
+    if config.is_json:
+        config.output_path = config.output_dir / f'{config.pptx_path.stem}.json'
         with open(config.output_path, 'w') as f:
             f.write(ast.model_dump_json(indent=2))
-        logger.info(f'presentation data saved to {config.output_path}')
+        logger.info(f'Presentation data saved to {config.output_path}')
         return
-
-    if config.is_wiki:
-        out = outputter.WikiFormatter(config)
-    elif config.is_mdk:
-        out = outputter.MadokoFormatter(config)
-    elif config.is_qmd:
-        out = outputter.QuartoFormatter(config)
-    elif config.is_marp:
-        out = outputter.MarpFormatter(config)
-    elif hasattr(config, 'is_beamer') and config.is_beamer:
-        out = outputter.BeamerFormatter(config)
-    else:
-        out = outputter.MarkdownFormatter(config)
-
-    out.output(ast)
-    logger.info(f'converted document saved to {config.output_path}')
+    
+    # Output the converted document to the specified format(s)
+    format_configs = [
+        ('is_md', '.md', 'md', outputter.MarkdownFormatter, 'Markdown'),
+        ('is_wiki', '.tid', 'wiki', outputter.WikiFormatter, 'Wiki'),
+        ('is_mdk', '.md', 'mdk', outputter.MadokoFormatter, 'Madoko'),
+        ('is_qmd', '.qmd', 'qmd', outputter.QuartoFormatter, 'Quarto'),
+        ('is_marp', '.md', 'marp', outputter.MarpFormatter, 'Marp'),
+        ('is_beamer', '.tex', 'beamer', outputter.BeamerFormatter, 'Beamer')
+    ]
+    
+    formats_selected = False
+    for attr_name, extension, suffix, formatter_class, format_name in format_configs:
+        if getattr(config, attr_name):
+            formats_selected = True
+            config.output_path = config.output_dir / f'{config.pptx_path.stem}_{suffix}{extension}'
+            out = formatter_class(config).output(ast)
+            logger.info(f'Converted {format_name} document saved to {config.output_path}')
+    
+    if not formats_selected:
+        logger.error("No output format specified")
+        return
