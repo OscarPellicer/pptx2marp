@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple # Union not obviously used directly
 
 # from rapidfuzz import fuzz # Not obviously used directly in BeamerFormatter specific logic
 
-from pptx2md.outputter.base import Formatter
+from pptx2md.outputter.base import Formatter, DEFAULT_SLIDE_WIDTH_PX # Import base items
 from pptx2md.types import ParsedPresentation, SlideElement, ElementType, SlideType, TextRun, ImageElement, FormulaElement # TextStyle not obviously used directly
 # from pptx2md.utils import rgb_to_hex # Not directly used, get_colored is overridden
 
@@ -136,39 +136,46 @@ class BeamerFormatter(Formatter):
     def output(self, presentation_data: ParsedPresentation):
         self.put_header()
         self.last_title_info: Optional[Tuple[str, int]] = None 
+        pres_original_slide_width_px = self.config.slide_width_px or DEFAULT_SLIDE_WIDTH_PX
 
         for slide_idx, slide in enumerate(presentation_data.slides):
-            slide_elements_for_processing: List[SlideElement] = []
-            is_multicolumn_slide_type = False
+            # Elements for density calculation (overall slide content)
+            initial_all_elements_for_density: List[SlideElement] = []
+            # Elements that will be separated (title, floated images, other initial content)
+            elements_to_separate: List[SlideElement] = []
+            
+            is_multicolumn_slide_type = slide.type == SlideType.MultiColumn
             original_columns_data: Optional[List[List[SlideElement]]] = None
 
-            if slide.type == SlideType.General:
-                slide_elements_for_processing = slide.elements
-            elif slide.type == SlideType.MultiColumn:
-                is_multicolumn_slide_type = True
-                slide_elements_for_processing = slide.preface
+            if is_multicolumn_slide_type:
+                initial_all_elements_for_density = slide.preface + [el for col in (slide.columns or []) for el in col]
+                elements_to_separate = slide.preface # Separate only from preface for multicol
                 original_columns_data = slide.columns
+            else: # General slide type
+                initial_all_elements_for_density = slide.elements
+                elements_to_separate = slide.elements
 
-            if not slide_elements_for_processing and not (is_multicolumn_slide_type and original_columns_data):
+            if not initial_all_elements_for_density : # If truly empty after considering all parts
                 if slide_idx < len(presentation_data.slides) - 1:
                     self.write(r'\begin{frame}{}\end{frame}' + '\n\n') 
                 continue
 
-            initial_all_text_elements = slide.preface + [el for col in (original_columns_data or []) for el in col] if is_multicolumn_slide_type else slide_elements_for_processing
-            line_count, _, _, _, text_lines_for_avg, text_chars_for_avg = \
-                self._get_slide_content_metrics(initial_all_text_elements)
+            # Separate title, floated images, and other content from 'elements_to_separate'
+            main_title_element, floated_elements, other_preface_or_general_content = \
+                self._separate_slide_elements(
+                    elements_to_separate,
+                    pres_original_slide_width_px,
+                    pres_original_slide_width_px # For Beamer, target hint width is original width
+                )
+
+            line_count, _, _, _, _, _ = \
+                self._get_slide_content_metrics(initial_all_elements_for_density)
             density_class = self._get_slide_density_class(line_count)
             
             self.write(r'\begin{frame}')
             self.in_frame = True
             
-            main_title_element: Optional[SlideElement] = None
-            content_after_title: List[SlideElement] = [] 
-
-            if slide_elements_for_processing and slide_elements_for_processing[0].type == ElementType.Title:
-                main_title_element = slide_elements_for_processing[0]
-                content_after_title = slide_elements_for_processing[1:]
-                
+            if main_title_element:
                 title_text_runs = main_title_element.content if isinstance(main_title_element.content, list) else None
                 title_text_str = main_title_element.content if isinstance(main_title_element.content, str) else None
                 formatted_title = ""
@@ -180,74 +187,92 @@ class BeamerFormatter(Formatter):
                     if isinstance(main_title_element.content, str):
                          self.last_title_info = (main_title_element.content.strip(), main_title_element.level)
                     else: 
-                         self.last_title_info = (formatted_title, main_title_element.level)
-            else:
-                content_after_title = slide_elements_for_processing
+                         self.last_title_info = (formatted_title, main_title_element.level) # Or derive from runs
             
             current_font_scale_opened = False
+            font_scale_prefix = ""
+            font_scale_suffix = ""
             if density_class == "small": 
-                self.write(r'{\small' + "\n")
+                font_scale_prefix = r'{\small' + "\n"
+                font_scale_suffix = "\n}\n"
                 current_font_scale_opened = True
             elif density_class == "smaller": 
-                self.write(r'{\footnotesize' + "\n")
+                font_scale_prefix = r'{\footnotesize' + "\n"
+                font_scale_suffix = "\n}\n"
                 current_font_scale_opened = True
             elif density_class == "smallest": 
-                self.write(r'{\scriptsize' + "\n")
+                font_scale_prefix = r'{\scriptsize' + "\n"
+                font_scale_suffix = "\n}\n"
                 current_font_scale_opened = True
-
-            actually_split_columns_heuristic = False
-            if not is_multicolumn_slide_type and content_after_title:
-                _, _, _, _, ca_text_lines, ca_text_chars = self._get_slide_content_metrics(content_after_title)
-                current_content_density_class = self._get_slide_density_class(ca_text_lines)
-
-                initial_split_qualification = False
-                if current_content_density_class in ["smaller", "smallest"]:
-                    if ca_text_lines > 0:
-                        avg_line_length = ca_text_chars / ca_text_lines
-                        if avg_line_length < 40:
-                            initial_split_qualification = True
-                
-                contains_table_in_content = any(el.type == ElementType.Table for el in content_after_title)
-                
-                actually_split_columns_heuristic = initial_split_qualification and \
-                                         len(content_after_title) >= 2 and \
-                                         not contains_table_in_content
-
-            if is_multicolumn_slide_type and original_columns_data:
-                if main_title_element and slide_elements_for_processing == slide.preface:
-                     self._put_elements_on_slide(content_after_title) 
-                elif not main_title_element and slide.preface:
-                     self._put_elements_on_slide(slide.preface)
-
-                num_cols = len(original_columns_data)
-                if num_cols > 0:
-                    self.write(r'\begin{columns}[T]' + '\n')
-                    col_width = f'{1/num_cols:.2f}'
-                    for column_data_list in original_columns_data:
-                        self.write(r'  \column{' + col_width + r'\textwidth}' + '\n')
-                        self._put_elements_on_slide(column_data_list)
-                    self.write(r'\end{columns}' + '\n')
-
-            elif actually_split_columns_heuristic:
-                num_in_first_col = (len(content_after_title) + 1) // 2
-                first_half_elements = content_after_title[:num_in_first_col]
-                second_half_elements = content_after_title[num_in_first_col:]
-
-                self.write(r'\begin{columns}[T]' + '\n')
-                self.write(r'  \column{0.48\textwidth}' + '\n')
-                self._put_elements_on_slide(first_half_elements)
-                self.write(r'  \column{0.48\textwidth}' + '\n')
-                self._put_elements_on_slide(second_half_elements)
-                self.write(r'\end{columns}' + '\n')
-            else:
-                self._put_elements_on_slide(content_after_title)
             
+            if current_font_scale_opened: self.write(font_scale_prefix)
+
+            # Output floated images first
+            if floated_elements:
+                self._put_elements_on_slide(floated_elements)
+
+            # Now handle the remaining content (other_preface_or_general_content) and original_columns_data
+            
+            if is_multicolumn_slide_type:
+                # Output remaining preface content (non-title, non-floated from preface)
+                if other_preface_or_general_content:
+                    self._put_elements_on_slide(other_preface_or_general_content)
+                
+                # Then process the actual columns
+                if original_columns_data:
+                    num_cols = len(original_columns_data)
+                    if num_cols > 0:
+                        self.write(r'\begin{columns}[T]' + '\n')
+                        # Ensure col_width calculation is robust, e.g. handles num_cols=0 if it could occur
+                        col_width_val = (1.0 / num_cols) if num_cols > 0 else 1.0
+                        col_width = f'{col_width_val:.2f}'
+
+                        for column_data_list in original_columns_data:
+                            self.write(r'  \column{' + col_width + r'\textwidth}' + '\n')
+                            self._put_elements_on_slide(column_data_list)
+                        self.write(r'\end{columns}' + '\n')
+            else: # General slide type, apply heuristic column splitting if needed
+                actually_split_columns_heuristic = False
+                if other_preface_or_general_content: # Check based on remaining content
+                    _, _, _, _, ca_text_lines, ca_text_chars = self._get_slide_content_metrics(other_preface_or_general_content)
+                    # Use a density class based on this remaining content for splitting decision
+                    # Or use the overall slide_density_class (density_class variable)
+                    # Let's use a specific density check for column content:
+                    content_density_for_cols_class = self._get_slide_density_class(ca_text_lines)
+
+                    initial_split_qualification = False
+                    if content_density_for_cols_class in ["smaller", "smallest"]: # or density_class
+                        if ca_text_lines > 0:
+                            avg_line_length = ca_text_chars / ca_text_lines
+                            if avg_line_length < self.config.beamer_columns_line_length_threshold: # Configurable threshold
+                                initial_split_qualification = True
+                    
+                    contains_table_in_content = any(el.type == ElementType.Table for el in other_preface_or_general_content)
+                    
+                    actually_split_columns_heuristic = initial_split_qualification and \
+                                             len(other_preface_or_general_content) >= 2 and \
+                                             not contains_table_in_content
+                
+                if actually_split_columns_heuristic:
+                    num_in_first_col = (len(other_preface_or_general_content) + 1) // 2
+                    first_half_elements = other_preface_or_general_content[:num_in_first_col]
+                    second_half_elements = other_preface_or_general_content[num_in_first_col:]
+
+                    self.write(r'\begin{columns}[T]' + '\n')
+                    self.write(r'  \column{0.48\textwidth}' + '\n') # Default split
+                    self._put_elements_on_slide(first_half_elements)
+                    self.write(r'  \column{0.48\textwidth}' + '\n')
+                    self._put_elements_on_slide(second_half_elements)
+                    self.write(r'\end{columns}' + '\n')
+                elif other_preface_or_general_content: # Not splitting, print as single block
+                    self._put_elements_on_slide(other_preface_or_general_content)
+
             if not self.config.disable_notes and slide.notes:
                 escaped_notes = [self.get_escaped(note) for note in slide.notes]
                 self.write(r'\note{' + '\n'.join(escaped_notes) + '}\n')
 
             if current_font_scale_opened: 
-                self.write("\n}\n")
+                self.write(font_scale_suffix)
             
             self.write(r'\end{frame}' + '\n\n')
             self.in_frame = False
@@ -472,3 +497,210 @@ class BeamerFormatter(Formatter):
             indent_str = '  ' * self.current_list_level
             self.write(indent_str + r'\end{itemize}' + '\n')
         self.current_list_level = 0 
+
+    def _separate_slide_elements(
+        self,
+        initial_elements: List[SlideElement],
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Tuple[Optional[SlideElement], List[ImageElement], List[SlideElement]]:
+        main_title_element: Optional[SlideElement] = None
+        floated_image_elements: List[ImageElement] = []
+        other_content_elements: List[SlideElement] = []
+        
+        temp_content_pool = list(initial_elements) # Work on a copy
+
+        if temp_content_pool and temp_content_pool[0].type == ElementType.Title:
+            main_title_element = temp_content_pool.pop(0)
+
+        for element in temp_content_pool:
+            if isinstance(element, ImageElement):
+                hint = self._get_image_effective_position_hint(
+                    element, 
+                    original_slide_width_px,
+                    target_slide_width_px
+                )
+                if hint in ["left", "right"]:
+                    floated_image_elements.append(element)
+                else:
+                    other_content_elements.append(element)
+            else:
+                other_content_elements.append(element)
+                
+        return main_title_element, floated_image_elements, other_content_elements
+
+    def _get_image_effective_position_hint(
+        self, 
+        element: ImageElement, 
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Optional[str]:
+        scaled_display_width = self._get_scaled_image_width_for_hinting(
+            element, original_slide_width_px, target_slide_width_px
+        )
+        
+        calculated_hint = None
+        
+        if element.left_px is not None and original_slide_width_px > 0 and \
+           scaled_display_width is not None and scaled_display_width > 0:
+            
+            # Scale left_px to the target coordinate system
+            if original_slide_width_px > 0 :
+                 scaled_left_px = int(round(element.left_px * (target_slide_width_px / original_slide_width_px)))
+            else: # Should not happen, but as a fallback
+                 scaled_left_px = element.left_px
+
+
+            image_center_x = scaled_left_px + (scaled_display_width / 2)
+            slide_width_for_hinting = target_slide_width_px # Use target width for boundaries
+            
+            left_third_boundary = slide_width_for_hinting / 3
+            right_third_boundary = 2 * slide_width_for_hinting / 3
+
+            # Allow a small tolerance for centering, e.g., 5-10% of slide width around the true center.
+            # center_tolerance = slide_width_for_hinting * 0.05 
+            # slide_center = slide_width_for_hinting / 2
+
+            # if abs(image_center_x - slide_center) < center_tolerance:
+            #     calculated_hint = "center"
+            if left_third_boundary < image_center_x < right_third_boundary:
+                calculated_hint = "center" 
+            elif image_center_x < left_third_boundary: 
+                calculated_hint = "left"
+            elif image_center_x > right_third_boundary: 
+                calculated_hint = "right"
+        
+        # Prioritize explicit hint if available and valid
+        explicit_hint = getattr(element, 'position_hint', None)
+        if explicit_hint in ["left", "right", "center"]:
+            return explicit_hint
+        
+        return calculated_hint
+
+    def _get_scaled_image_width_for_hinting(
+        self, 
+        element: ImageElement, 
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Optional[int]:
+        ppt_display_width = element.display_width_px
+
+        if ppt_display_width is None and self.config.image_width is not None: # Default width from config
+            ppt_display_width = self.config.image_width
+        
+        if ppt_display_width is not None and original_slide_width_px > 0:
+            width_scale_factor = target_slide_width_px / original_slide_width_px
+            return int(round(ppt_display_width * width_scale_factor))
+        
+        return None
+
+    def _get_slide_content_metrics(self, elements: List[SlideElement]) -> Tuple[int, int, Optional[int], Optional[int], int, int]:
+        line_count = 0
+        char_count = 0
+        max_img_w: Optional[int] = None
+        max_img_h: Optional[int] = None
+        text_lines_for_avg = 0 # For calculating average line length, excluding titles
+        text_chars_for_avg = 0 # For calculating average line length, excluding titles
+
+        for element in elements:
+            content_str = ""
+            is_title = element.type == ElementType.Title
+
+            if element.type in [ElementType.Title, ElementType.Paragraph, ElementType.ListItem]:
+                if isinstance(element.content, list): # List of TextRuns
+                    for run in element.content:
+                        content_str += run.text
+                elif isinstance(element.content, str):
+                    content_str = element.content
+                
+                lines_in_element = content_str.count('\n') + 1 if content_str else 0
+                line_count += lines_in_element
+                char_count += len(content_str)
+                if not is_title:
+                    text_lines_for_avg += lines_in_element
+                    text_chars_for_avg += len(content_str)
+
+            elif isinstance(element, ImageElement):
+                if element.display_width_px is not None:
+                    max_img_w = max(max_img_w or 0, element.display_width_px)
+                if element.display_height_px is not None:
+                    max_img_h = max(max_img_h or 0, element.display_height_px)
+                # Add a nominal line count for an image to contribute to density
+                line_count += self.config.image_density_line_equivalent
+                if not is_title: # Unlikely for an image to be a title, but for consistency
+                    text_lines_for_avg += self.config.image_density_line_equivalent
+
+
+            elif element.type == ElementType.Table:
+                if element.content: # List of lists (rows of cells)
+                    num_rows = len(element.content)
+                    line_count += num_rows * self.config.table_row_density_line_equivalent
+                    if not is_title:
+                         text_lines_for_avg += num_rows * self.config.table_row_density_line_equivalent
+                    for row in element.content:
+                        for cell in row:
+                            cell_str = ""
+                            if isinstance(cell, list): # List of TextRuns
+                                for run in cell: cell_str += run.text
+                            elif isinstance(cell, str): cell_str = cell
+                            char_count += len(cell_str)
+                            if not is_title: text_chars_for_avg += len(cell_str)
+            
+            elif element.type == ElementType.CodeBlock and isinstance(element.content, str):
+                lines_in_code = element.content.count('\n') + 1 if element.content else 0
+                line_count += lines_in_code
+                char_count += len(element.content)
+                if not is_title:
+                    text_lines_for_avg += lines_in_code
+                    text_chars_for_avg += len(element.content)
+
+        return line_count, char_count, max_img_w, max_img_h, text_lines_for_avg, text_chars_for_avg
+
+    def _get_slide_density_class(self, line_count: int) -> Optional[str]:
+        if line_count >= self.config.smallest_font_line_threshold:
+            return "smallest"
+        elif line_count >= self.config.smaller_font_line_threshold:
+            return "smaller"
+        elif line_count >= self.config.small_font_line_threshold:
+            return "small"
+        return None
+
+    def _format_text_with_delimiters(self, text: str, start_delim: str, end_delim: str) -> str:
+        # Helper for simple formatting like bold or italic
+        # Recursively apply to handle nested TextRuns if text is a list
+        if isinstance(text, list) and all(isinstance(run, TextRun) for run in text):
+            return start_delim + self.get_formatted_runs(text) + end_delim
+        return start_delim + str(text) + end_delim
+        
+    def get_formatted_runs(self, runs: List[TextRun]) -> str:
+        if not runs:
+            return ""
+        
+        formatted_texts: List[str] = []
+        for run in runs:
+            text_content = self.get_escaped(run.text)
+            
+            if run.style.is_code:
+                text_content = self.get_inline_code(run.text) # Use raw run.text for code
+            else:
+                if run.style.is_accent and run.style.is_strong:
+                    # Apply strong first, then accent for combined effect (e.g., **_text_**)
+                    # Or let specific formatters decide combined style if they have one.
+                    # This simple nesting might not always be ideal for all markdown flavors.
+                    text_content = self.get_accent(self.get_strong(text_content))
+                elif run.style.is_strong:
+                    text_content = self.get_strong(text_content)
+                elif run.style.is_accent:
+                    text_content = self.get_accent(text_content)
+
+                if run.style.color_rgb:
+                    text_content = self.get_colored(text_content, run.style.color_rgb)
+            
+            if run.style.hyperlink:
+                # For hyperlinks, the text_content is already formatted (bold, italic, color).
+                # The raw run.text should be used if the link text itself shouldn't inherit formatting.
+                # However, usually the displayed text part of a link can be styled.
+                text_content = self.get_hyperlink(text_content, run.style.hyperlink)
+
+            formatted_texts.append(text_content)
+        return "".join(formatted_texts) 

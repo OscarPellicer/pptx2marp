@@ -31,6 +31,26 @@ class MarpFormatter(Formatter):
 
     def put_header(self):
         css_content = """
+@import url('https://fonts.googleapis.com/css2?family=Cabin:ital,wght@0,400..700;1,400..700&family=Lato:ital,wght@0,100;0,300;0,400;0,700;0,900;1,100;1,300;1,400;1,700;1,900&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Lora:ital,wght@0,400..700;1,400..700&family=Montserrat:ital,wght@0,100..900;1,100..900&family=Mulish:ital,wght@0,200..1000;1,200..1000&family=Open+Sans:ital,wght@0,300..800;1,300..800&family=Roboto:ital,wght@0,100;0,300;0,400;0,500;0,700;0,900;1,100;1,300;1,400;1,500;1,700;1,900&family=Ubuntu:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');
+
+/* --- FONT SELECTION --- */
+/* Uncomment one of the following font-family lines to change the slide font */
+/* Default Marp font is usually sans-serif based */
+section { font-family: 'Open Sans', sans-serif; }
+/* section { font-family: 'Roboto', sans-serif; } */
+/* section { font-family: 'Montserrat', sans-serif; } */
+/* section { font-family: 'Cabin', sans-serif; } */
+/* section { font-family: 'Ubuntu', sans-serif; } */
+/* section { font-family: 'Lato', sans-serif; } */
+/* section { font-family: 'Mulish', sans-serif; } */
+/* section { font-family: 'Lora', serif; } */
+/* section { font-family: 'Libre Baskerville', serif; } */
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 400; /* Lighter weight for titles */
+  color:rgb(45, 45, 45); /* Black color for titles */
+}
+
 section.small {
   font-size: 24px;
 }
@@ -263,99 +283,95 @@ html: true
         self.put_header() # Writes directly to file
         self.last_title_info = None # Reset for each presentation
 
+        pres_original_slide_width_px = self.config.slide_width_px or DEFAULT_SLIDE_WIDTH_PX
+
         num_total_slides = len(presentation_data.slides)
         marp_slide_counter = 0
 
         for slide_idx, slide in enumerate(presentation_data.slides):
             marp_slide_counter += 1
 
-            all_elements: List[SlideElement] = []
+            initial_elements_for_slide: List[SlideElement] = []
             if slide.type == SlideType.General:
-                all_elements = slide.elements
+                initial_elements_for_slide = slide.elements
             elif slide.type == SlideType.MultiColumn:
-                # For Marp, flatten MultiColumn for now, title separation will handle preface.
-                all_elements = slide.preface + [el for col in slide.columns for el in col] 
+                # For Marp, flatten MultiColumn for now. Title/floats from preface, then other content.
+                initial_elements_for_slide = slide.preface + [el for col in slide.columns for el in col] 
 
-            if not all_elements: 
+            if not initial_elements_for_slide: 
                  if marp_slide_counter < num_total_slides : 
                     self.write("\n---\n\n") # Writes directly to file
                  continue
 
-            # USE THE BASE CLASS METHODS
+            # Separate title, floated images, and other content elements using base method
+            main_title_element, floated_image_elements, other_content_elements = \
+                self._separate_slide_elements(
+                    initial_elements_for_slide,
+                    pres_original_slide_width_px,
+                    MARP_TARGET_WIDTH_PX # Marp's target rendering width
+                )
+
+            # Calculate overall slide metrics based on all initial elements for density class
             line_count, char_count, max_img_w, max_img_h, text_lines_for_avg, text_chars_for_avg = \
-                self._get_slide_content_metrics(all_elements)
+                self._get_slide_content_metrics(initial_elements_for_slide) # Use all original elements for density
             current_slide_class = self._get_slide_density_class(line_count)
 
-            # Determine if slide qualifies for splitting based on its overall content metrics
+            # Determine if slide qualifies for column splitting based on 'other_content_elements'
             initial_split_qualification = False
             if current_slide_class in ["smaller", "smallest"]:
-                if text_lines_for_avg > 0:
-                    avg_line_length = text_chars_for_avg / text_lines_for_avg
-                    if avg_line_length < 40:
+                 # Calculate text metrics specifically for content that would go into columns
+                _, _, _, _, other_text_lines, other_text_chars = \
+                    self._get_slide_content_metrics(other_content_elements) # Metrics from non-title, non-floated
+                
+                if other_text_lines > 0: 
+                    avg_line_length = other_text_chars / other_text_lines
+                    if avg_line_length < self.config.marp_columns_line_length_threshold: # Use a config threshold
                         initial_split_qualification = True
             
-            # Identify title and content that would go into columns
-            main_title_element: Optional[SlideElement] = None
-            content_for_columns: List[SlideElement] = all_elements
-
-            if all_elements and all_elements[0].type == ElementType.Title:
-                main_title_element = all_elements[0]
-                content_for_columns = all_elements[1:] # Elements after the title
-
-            # Final decision: must qualify AND have enough elements left for columns
-            # AND not contain a table in the content intended for columns.
-            contains_table_in_content_for_columns = False
-            if initial_split_qualification: # Only check for tables if it might split
-                for element in content_for_columns:
+            contains_table_in_other_content = False
+            if initial_split_qualification:
+                for element in other_content_elements:
                     if element.type == ElementType.Table:
-                        contains_table_in_content_for_columns = True
+                        contains_table_in_other_content = True
                         break
             
             actually_split_columns = initial_split_qualification and \
-                                     len(content_for_columns) >= 2 and \
-                                     not contains_table_in_content_for_columns
+                                     len(other_content_elements) >= 2 and \
+                                     not contains_table_in_other_content
 
-            # Determine effective slide class
             effective_slide_class = current_slide_class
             if actually_split_columns:
-                # If it was going to be 'smaller' or 'smallest' and we are splitting,
-                # make it 'small' as content is now distributed.
                 if current_slide_class in ["smaller", "smallest"]:
-                    effective_slide_class = "small"
+                    effective_slide_class = "small" # Content is distributed
             
-            # Output class directive (if any)
             if effective_slide_class:
-                self.write(f"<!-- _class: {effective_slide_class} -->\n\n") # Writes directly
+                self.write(f"<!-- _class: {effective_slide_class} -->\n\n")
 
-            # Output the main title (if it was identified and separated)
             if main_title_element:
                 self._put_elements_on_slide([main_title_element], is_continued_slide=False)
 
-            # Output the remaining content, either in columns or as a single block
-            if actually_split_columns:
-                # Split content_for_columns and output in two divs
-                num_in_first_col = (len(content_for_columns) + 1) // 2
-                first_half_elements = content_for_columns[:num_in_first_col]
-                second_half_elements = content_for_columns[num_in_first_col:]
+            if floated_image_elements:
+                self._put_elements_on_slide(floated_image_elements, is_continued_slide=False)
 
-                self.write('<div class="columns">\n<div>\n\n') # Writes directly
+            if actually_split_columns:
+                num_in_first_col = (len(other_content_elements) + 1) // 2
+                first_half_elements = other_content_elements[:num_in_first_col]
+                second_half_elements = other_content_elements[num_in_first_col:]
+
+                self.write('<div class="columns">\n<div>\n\n')
                 self._put_elements_on_slide(first_half_elements, is_continued_slide=False)
-                self.write('\n</div>\n<div>\n\n') # Writes directly
+                self.write('\n</div>\n<div>\n\n')
                 self._put_elements_on_slide(second_half_elements, is_continued_slide=False)
-                self.write('\n</div>\n</div>\n\n') # Writes directly
+                self.write('\n</div>\n</div>\n\n')
             else:
-                # Not splitting columns (either didn't qualify or not enough content after title).
-                # Output content_for_columns as a single block.
-                # This list contains all elements if no title was found at the start,
-                # or elements after the title if a title was found and already printed.
-                if content_for_columns: # Only print if there's content remaining
-                    self._put_elements_on_slide(content_for_columns, is_continued_slide=False)
+                if other_content_elements: 
+                    self._put_elements_on_slide(other_content_elements, is_continued_slide=False)
             
             if not self.config.disable_notes and slide.notes:
-                self.write("<!--\n") # Writes directly
+                self.write("<!--\n")
                 for note_line in slide.notes:
-                    self.write(f"{note_line}\n") # Writes directly
-                self.write("-->\n\n") # Writes directly
+                    self.write(f"{note_line}\n")
+                self.write("-->\n\n")
 
             # Add slide separator if not the very last conceptual slide
             is_last_original_slide = (slide_idx == num_total_slides - 1)
@@ -455,7 +471,6 @@ html: true
         # Use the calculated position_hint, or fallback to a hint provided on the element itself.
         effective_position_hint = position_hint or getattr(element, 'position_hint', None)
         
-        has_bg_keyword = False
         if effective_position_hint:
             if effective_position_hint == "center":
                 marp_alt_text_keywords.append("center") 
@@ -475,6 +490,7 @@ html: true
         elif "bg right" in " ".join(marp_alt_text_keywords): ordered_alt_keywords = ["bg", "right"]
         
         # Add non-background positioning keywords ("center", "left", "right").
+        has_bg_keyword = False # Disable background images for now
         if not has_bg_keyword:
             if "center" in marp_alt_text_keywords and "center" not in ordered_alt_keywords: ordered_alt_keywords.append("center")
             if "left" in marp_alt_text_keywords and "left" not in ordered_alt_keywords: ordered_alt_keywords.append("left")

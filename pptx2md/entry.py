@@ -61,7 +61,7 @@ def convert(config: ConversionConfig):
     for attr_name, extension, suffix, formatter_class, format_name in format_configs:
         if getattr(config, attr_name):
             formats_selected = True
-            config.output_path = config.output_dir / f'{config.pptx_path.stem}_{suffix}{extension}'
+            config.output_path = config.output_dir / f'{config.pptx_path.stem.replace(" ", "_")}_{suffix}{extension}'
             out = formatter_class(config).output(ast)
             logger.info(f'Converted {format_name} document saved to {config.output_path}')
     

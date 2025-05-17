@@ -18,6 +18,7 @@ import re
 import urllib.parse
 from typing import List, Tuple, Optional, Union
 import io
+import abc
 
 from rapidfuzz import fuzz
 
@@ -37,7 +38,7 @@ DEFAULT_SLIDE_HEIGHT_PX = 900
 MARP_TARGET_WIDTH_PX = 1280
 MARP_TARGET_HEIGHT_PX = 720
 
-class Formatter:
+class Formatter(abc.ABC):
 
     def __init__(self, config: ConversionConfig):
         os.makedirs(config.output_path.parent, exist_ok=True)
@@ -518,3 +519,99 @@ class Formatter:
         if self.ofile:
             self.ofile.close()
             self.ofile = None # type: ignore
+
+    def _get_scaled_image_width_for_hinting(
+        self, 
+        element: ImageElement, 
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Optional[int]:
+        ppt_display_width = element.display_width_px
+
+        if ppt_display_width is None and self.config.image_width is not None: # Default width from config
+            ppt_display_width = self.config.image_width
+        
+        if ppt_display_width is not None and original_slide_width_px > 0:
+            width_scale_factor = target_slide_width_px / original_slide_width_px
+            return int(round(ppt_display_width * width_scale_factor))
+        
+        return None
+
+    def _get_image_effective_position_hint(
+        self, 
+        element: ImageElement, 
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Optional[str]:
+        scaled_display_width = self._get_scaled_image_width_for_hinting(
+            element, original_slide_width_px, target_slide_width_px
+        )
+        
+        calculated_hint = None
+        
+        if element.left_px is not None and original_slide_width_px > 0 and \
+           scaled_display_width is not None and scaled_display_width > 0:
+            
+            # Scale left_px to the target coordinate system
+            if original_slide_width_px > 0 :
+                 scaled_left_px = int(round(element.left_px * (target_slide_width_px / original_slide_width_px)))
+            else: # Should not happen, but as a fallback
+                 scaled_left_px = element.left_px
+
+
+            image_center_x = scaled_left_px + (scaled_display_width / 2)
+            slide_width_for_hinting = target_slide_width_px # Use target width for boundaries
+            
+            left_third_boundary = slide_width_for_hinting / 3
+            right_third_boundary = 2 * slide_width_for_hinting / 3
+
+            # Allow a small tolerance for centering, e.g., 5-10% of slide width around the true center.
+            # center_tolerance = slide_width_for_hinting * 0.05 
+            # slide_center = slide_width_for_hinting / 2
+
+            # if abs(image_center_x - slide_center) < center_tolerance:
+            #     calculated_hint = "center"
+            if left_third_boundary < image_center_x < right_third_boundary:
+                calculated_hint = "center" 
+            elif image_center_x < left_third_boundary: 
+                calculated_hint = "left"
+            elif image_center_x > right_third_boundary: 
+                calculated_hint = "right"
+        
+        # Prioritize explicit hint if available and valid
+        explicit_hint = getattr(element, 'position_hint', None)
+        if explicit_hint in ["left", "right", "center"]:
+            return explicit_hint
+        
+        return calculated_hint
+
+    def _separate_slide_elements(
+        self,
+        initial_elements: List[SlideElement],
+        original_slide_width_px: float,
+        target_slide_width_px: float
+    ) -> Tuple[Optional[SlideElement], List[ImageElement], List[SlideElement]]:
+        main_title_element: Optional[SlideElement] = None
+        floated_image_elements: List[ImageElement] = []
+        other_content_elements: List[SlideElement] = []
+        
+        temp_content_pool = list(initial_elements) # Work on a copy
+
+        if temp_content_pool and temp_content_pool[0].type == ElementType.Title:
+            main_title_element = temp_content_pool.pop(0)
+
+        for element in temp_content_pool:
+            if isinstance(element, ImageElement):
+                hint = self._get_image_effective_position_hint(
+                    element, 
+                    original_slide_width_px,
+                    target_slide_width_px
+                )
+                if hint in ["left", "right"]:
+                    floated_image_elements.append(element)
+                else:
+                    other_content_elements.append(element)
+            else:
+                other_content_elements.append(element)
+                
+        return main_title_element, floated_image_elements, other_content_elements

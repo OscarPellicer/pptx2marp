@@ -115,6 +115,27 @@ class ConversionConfig:
 
     disable_image_wrapping: bool = False
     """Disable image wrapping"""
+
+    # Thresholds for font size adjustments / density classes
+    # These should ideally match or be derived from LINES_NORMAL_MAX etc. if those are global
+    small_font_line_threshold: int = 8 # Example value
+    smaller_font_line_threshold: int = 12 # Example value
+    smallest_font_line_threshold: int = 18 # Example value
+
+    # Thresholds for attempting to split content into columns
+    marp_columns_line_length_threshold: int = 40
+    beamer_columns_line_length_threshold: int = 40
+
+    # Equivalents for density calculation in _get_slide_content_metrics
+    image_density_line_equivalent: int = 3
+    table_row_density_line_equivalent: int = 1
+
+    def __post_init__(self):
+        if isinstance(self.pptx_path, str):
+            self.pptx_path = Path(self.pptx_path)
+        if isinstance(self.output_path, str):
+            self.output_path = Path(self.output_path)
+
 class ElementType(str, Enum):
     Title = "Title"
     ListItem = "ListItem"
