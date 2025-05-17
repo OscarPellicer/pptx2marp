@@ -73,7 +73,7 @@ def parse_args() -> ConversionConfig:
         pptx_path=args.pptx_path,
         output_path=None, #This will be automatically set in entry.py
         output_dir=args.output_dir,
-        image_dir=args.image_dir or args.output_dir / 'img',
+        image_dir=None, #This will be automatically set in entry.py
         title_path=args.title,
         image_width=args.image_width,
         disable_image=args.disable_image,

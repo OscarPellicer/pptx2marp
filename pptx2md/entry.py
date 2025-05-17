@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 
 def convert(config: ConversionConfig):
+    # Prepare custom titles if provided
     if config.title_path:
         config.custom_titles = prepare_titles(config.title_path)
 
+    # Load the .pptx file with python-pptx
     prs = load_pptx(config.pptx_path)
 
     # Extract and store actual slide dimensions in config
@@ -35,17 +37,23 @@ def convert(config: ConversionConfig):
     if hasattr(prs, 'slide_height') and prs.slide_height is not None:
         config.slide_height_px = emu_to_px(prs.slide_height)
 
-    logger.info("conversion started")
+    logger.info("Conversion started")
     logger.info(f"Detected slide dimensions: {config.slide_width_px}px width, {config.slide_height_px}px height.")
 
+    # Parse the .pptx file and store the abstract syntax tree
     ast = parse(config, prs)
 
+    # Output the raw .pptx abstract syntax tree in JSON format
     if config.is_json:
         config.output_path = config.output_dir / f'{config.pptx_path.stem}.json'
         with open(config.output_path, 'w') as f:
             f.write(ast.model_dump_json(indent=2))
         logger.info(f'Presentation data saved to {config.output_path}')
         return
+    
+    # Set the image directory if not provided
+    if config.image_dir is None:
+        config.image_dir = config.output_dir / f'{config.pptx_path.stem.replace(" ", "_")}_img'
     
     # Output the converted document to the specified format(s)
     format_configs = [
@@ -56,7 +64,6 @@ def convert(config: ConversionConfig):
         ('is_marp', '.md', 'marp', outputter.MarpFormatter, 'Marp'),
         ('is_beamer', '.tex', 'beamer', outputter.BeamerFormatter, 'Beamer')
     ]
-    
     formats_selected = False
     for attr_name, extension, suffix, formatter_class, format_name in format_configs:
         if getattr(config, attr_name):
