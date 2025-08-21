@@ -16,6 +16,7 @@
 import argparse
 import logging
 from pathlib import Path
+from dataclasses import replace
 
 from pptx2md.entry import convert
 from pptx2md.log import setup_logging
@@ -99,8 +100,14 @@ def parse_args() -> ConversionConfig:
 
 def main():
     config = parse_args()
-    convert(config)
-
+    
+    if config.pptx_path.is_dir():
+        pptx_files = list(config.pptx_path.glob("*.pptx"))
+        for pptx_file in pptx_files:
+            file_config = replace(config, pptx_path=pptx_file)
+            convert(file_config)
+    else:
+        convert(config)
 
 if __name__ == '__main__':
     main()
