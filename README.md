@@ -101,6 +101,43 @@ The first line with spaces in the begining is considered a second level heading 
 
 Use it with `pptx2md [filename] -t titles.txt`.
 
+## Usage Examples
+
+### Marp Slide Presentations
+
+Convert to Marp markdown with optimized settings for slide presentations:
+```sh
+pptx2md lecture.pptx --marp --disable-color --min-block-size 5 --keep-similar-titles
+```
+
+### LaTeX Beamer Presentations
+
+Convert to LaTeX Beamer format:
+```sh
+pptx2md slides.pptx --beamer --disable-color --min-block-size 5 --keep-similar-titles
+```
+
+### Multiple Output Formats
+
+Generate all supported formats from a single PPTX file:
+```sh
+pptx2md everything.pptx -o outputs/everything --disable-color --md --wiki --mdk --qmd --marp --beamer --min-block-size 5 --keep-similar-titles
+```
+
+### Batch Processing Directory
+
+Process all PPTX files in a directory:
+```sh
+pptx2md "/path/to/presentations/" -o "/path/to/output/" --marp --disable-color --min-block-size 5 --keep-similar-titles
+```
+
+### Custom Output Location
+
+Specify custom output directory and image folder:
+```sh
+pptx2md course_materials.pptx -o "outputs/course.md" -i "outputs/images" --marp --disable-color
+```
+
 ## Full Arguments 
 
 * `-t [filename]` provide the title file
